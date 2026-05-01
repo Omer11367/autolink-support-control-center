@@ -7,6 +7,7 @@ import { Card } from "@/components/ui";
 import { getDashboardStats } from "@/lib/tickets";
 import { formatDate, truncate } from "@/lib/utils";
 import { formatIntentLabel } from "@/lib/display";
+import { getEscalationState } from "@/lib/operations";
 
 export const dynamic = "force-dynamic";
 
@@ -18,7 +19,7 @@ export default async function DashboardPage() {
       <header className="flex flex-col justify-between gap-3 sm:flex-row sm:items-end">
         <div>
           <h1 className="text-2xl font-bold tracking-normal">Dashboard</h1>
-          <p className="mt-1 text-sm text-muted-foreground">Live support queue, Mark approvals, and bot handoff status.</p>
+          <p className="mt-1 text-sm text-muted-foreground">Focus here first: urgent SLA tickets, payment requests, and unknown intents need human action fastest.</p>
         </div>
         <Link href="/tickets" className="inline-flex min-h-10 items-center justify-center rounded-md bg-primary px-3 py-2 text-sm font-semibold text-primary-foreground">
           Open ticket queue
@@ -34,9 +35,54 @@ export default async function DashboardPage() {
         <MetricCard label="High priority" value={stats.highPriorityTickets} helper="Urgent or high priority queue" icon={Zap} />
         <MetricCard label="Telegram errors" value={stats.telegramSendErrors} helper="Detected failed bot responses" icon={AlertTriangle} />
         <MetricCard label="Last 24 hours" value={stats.last24HoursTickets} helper="New ticket volume today" icon={Clock3} />
+        <MetricCard label="Waiting >10 min" value={stats.waitingOver10Minutes} helper="Needs attention now" icon={Clock3} />
+        <MetricCard label="Waiting >30 min" value={stats.waitingOver30Minutes} helper="Urgent queue risk" icon={AlertTriangle} />
+        <MetricCard label="Payment tickets" value={stats.paymentTickets} helper="Funds, refunds, payment issues" icon={Zap} />
+        <MetricCard label="Unknown intents" value={stats.unknownIntentTickets} helper="Reclassify before replying" icon={Sparkles} />
       </section>
 
       <section className="grid gap-4 xl:grid-cols-[1.5fr_1fr]">
+        <Card className="xl:col-span-2">
+          <div className="mb-4">
+            <h2 className="text-lg font-bold">Attention queue</h2>
+            <p className="text-sm text-muted-foreground">Unresolved tickets breaching the 10 or 30 minute SLA windows.</p>
+          </div>
+          {stats.attentionTickets.length === 0 ? (
+            <EmptyState title="No urgent tickets" description="Nothing is currently breaching the attention windows." />
+          ) : (
+            <div className="overflow-x-auto">
+              <table className="w-full min-w-[850px] text-left text-sm">
+                <thead className="border-b border-border text-xs uppercase text-muted-foreground">
+                  <tr>
+                    <th className="py-3 pr-4">Ticket</th>
+                    <th className="py-3 pr-4">Intent</th>
+                    <th className="py-3 pr-4">SLA</th>
+                    <th className="py-3 pr-4">Message</th>
+                    <th className="py-3">Open</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-border">
+                  {stats.attentionTickets.map((ticket) => (
+                    <tr key={ticket.id} className="hover:bg-muted/60">
+                      <td className="py-3 pr-4 font-semibold">{ticket.ticket_code ?? ticket.id.slice(0, 8)}</td>
+                      <td className="py-3 pr-4">{formatIntentLabel(ticket.intent)}</td>
+                      <td className="py-3 pr-4">
+                        {getEscalationState(ticket) === "urgent" ? (
+                          <StatusBadge value="urgent" type="priority" label="Urgent" />
+                        ) : (
+                          <StatusBadge value="waiting_for_mark" label="Needs attention" />
+                        )}
+                      </td>
+                      <td className="py-3 pr-4 text-muted-foreground">{truncate(ticket.client_original_message, 96)}</td>
+                      <td className="py-3"><Link className="font-semibold text-primary hover:underline" href={`/tickets/${ticket.id}`}>Open</Link></td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </Card>
+
         <Card>
           <div className="mb-4 flex items-center justify-between gap-3">
             <div>

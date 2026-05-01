@@ -1,6 +1,7 @@
 import Link from "next/link";
 import { notFound } from "next/navigation";
 import { ArrowLeft, Bot, CheckCircle2, MessageSquare, StickyNote, UserRound } from "lucide-react";
+import { CopyButton } from "@/components/copy-button";
 import { ReclassifyTicket } from "@/components/reclassify-ticket";
 import { StatusBadge } from "@/components/status-badge";
 import { TicketActions } from "@/components/ticket-actions";
@@ -82,7 +83,10 @@ export default async function TicketDetailPage({ params }: { params: { id: strin
 
       <header className="flex flex-col justify-between gap-3 lg:flex-row lg:items-start">
         <div>
-          <h1 className="text-2xl font-bold tracking-normal">{ticket.ticket_code ?? ticket.id}</h1>
+          <div className="flex flex-wrap items-center gap-2">
+            <h1 className="text-2xl font-bold tracking-normal">{ticket.ticket_code ?? ticket.id}</h1>
+            <CopyButton value={ticket.ticket_code ?? ticket.id} label="Copy ticket" />
+          </div>
           <p className="mt-1 text-sm text-muted-foreground">
             {formatIntentLabel(ticket.intent)} | Created {formatDate(ticket.created_at)} | Updated {formatDate(ticket.updated_at)}
           </p>
@@ -97,7 +101,7 @@ export default async function TicketDetailPage({ params }: { params: { id: strin
         </div>
       </header>
 
-      <section className="grid gap-4 xl:grid-cols-[1.35fr_0.9fr]">
+      <section className="grid gap-4 xl:grid-cols-[0.95fr_1.05fr_0.9fr]">
         <div className="space-y-4">
           <Card>
             <h2 className="text-lg font-bold">Client message</h2>
@@ -107,6 +111,11 @@ export default async function TicketDetailPage({ params }: { params: { id: strin
               <div><dt className="text-muted-foreground">Client chat id</dt><dd className="font-medium">{ticket.client_chat_id ?? "Missing"}</dd></div>
               <div><dt className="text-muted-foreground">User id</dt><dd className="font-medium">{ticket.client_user_id ?? "Missing"}</dd></div>
             </dl>
+            {ticket.client_chat_id ? (
+              <p className="mt-4 rounded-md border border-border bg-muted p-3 text-sm text-muted-foreground">
+                Telegram chat id available for manual lookup: <span className="font-mono text-foreground">{ticket.client_chat_id}</span>
+              </p>
+            ) : null}
           </Card>
 
           <Card>
@@ -123,32 +132,10 @@ export default async function TicketDetailPage({ params }: { params: { id: strin
             ) : (
               <p className="mt-3 rounded-md bg-muted p-4 text-sm text-muted-foreground">No extracted data yet.</p>
             )}
-            <pre className="mt-3 max-h-96 overflow-auto rounded-md bg-muted p-4 text-xs leading-5">{prettyJson(ticket.extracted_data)}</pre>
-          </Card>
-
-          <Card>
-            <h2 className="text-lg font-bold">Timeline</h2>
-            <div className="mt-4 space-y-4">
-              {timeline.length === 0 ? (
-                <p className="text-sm text-muted-foreground">No timeline events yet.</p>
-              ) : timeline.map((item, index) => {
-                const Icon = item.icon;
-                return (
-                  <div key={`${item.title}-${index}`} className="flex gap-3">
-                    <div className="mt-1 flex h-8 w-8 shrink-0 items-center justify-center rounded-md bg-muted">
-                      <Icon className="h-4 w-4" aria-hidden="true" />
-                    </div>
-                    <div className="min-w-0">
-                      <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
-                        <p className="font-semibold">{item.title}</p>
-                        <p className="text-xs text-muted-foreground">{formatDate(item.at)}</p>
-                      </div>
-                      <p className="mt-1 whitespace-pre-wrap text-sm text-muted-foreground">{item.text}</p>
-                    </div>
-                  </div>
-                );
-              })}
-            </div>
+            <details className="mt-3 rounded-md border border-border bg-muted p-3">
+              <summary className="cursor-pointer text-sm font-semibold">Raw JSON</summary>
+              <pre className="mt-3 max-h-96 overflow-auto text-xs leading-5">{prettyJson(ticket.extracted_data)}</pre>
+            </details>
           </Card>
         </div>
 
@@ -189,11 +176,15 @@ export default async function TicketDetailPage({ params }: { params: { id: strin
           <Card>
             <h2 className="text-lg font-bold">Internal summary</h2>
             <p className="mt-3 whitespace-pre-wrap text-sm text-muted-foreground">{ticket.internal_summary ?? "No internal summary yet."}</p>
+            {ticket.internal_summary ? <div className="mt-3"><CopyButton value={ticket.internal_summary} label="Copy summary" /></div> : null}
           </Card>
 
           <Card>
             <h2 className="text-lg font-bold">Suggested completion</h2>
             <p className="mt-3 whitespace-pre-wrap rounded-md bg-muted p-3 text-sm">{ticket.completion_message ?? getDefaultCompletionForIntent(ticket.intent)}</p>
+            <div className="mt-3">
+              <CopyButton value={ticket.completion_message ?? getDefaultCompletionForIntent(ticket.intent)} label="Copy reply" />
+            </div>
           </Card>
 
           <Card>
@@ -201,13 +192,6 @@ export default async function TicketDetailPage({ params }: { params: { id: strin
             <p className="mt-1 text-sm text-muted-foreground">Preview local classifier output before applying it to the ticket.</p>
             <div className="mt-4">
               <ReclassifyTicket ticketId={ticket.id} messageText={ticket.client_original_message ?? ""} currentIntent={ticket.intent} />
-            </div>
-          </Card>
-
-          <Card>
-            <h2 className="text-lg font-bold">Internal notes</h2>
-            <div className="mt-4">
-              <TicketNotes ticketId={ticket.id} notes={notes} />
             </div>
           </Card>
 
@@ -222,6 +206,41 @@ export default async function TicketDetailPage({ params }: { params: { id: strin
                 telegramConfigured={telegramConfigured}
                 recommendation={recommendation}
               />
+            </div>
+          </Card>
+        </div>
+
+        <div className="space-y-4">
+          <Card>
+            <h2 className="text-lg font-bold">Timeline</h2>
+            <div className="mt-4 space-y-4">
+              {timeline.length === 0 ? (
+                <p className="text-sm text-muted-foreground">No timeline events yet.</p>
+              ) : timeline.map((item, index) => {
+                const Icon = item.icon;
+                const isTelegramError = item.title.toLowerCase().includes("failure");
+                return (
+                  <div key={`${item.title}-${index}`} className="flex gap-3">
+                    <div className={isTelegramError ? "mt-1 flex h-8 w-8 shrink-0 items-center justify-center rounded-md bg-danger/10 text-danger" : "mt-1 flex h-8 w-8 shrink-0 items-center justify-center rounded-md bg-muted"}>
+                      <Icon className="h-4 w-4" aria-hidden="true" />
+                    </div>
+                    <div className="min-w-0">
+                      <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
+                        <p className="font-semibold">{item.title}</p>
+                        <p className="text-xs text-muted-foreground">{formatDate(item.at)}</p>
+                      </div>
+                      <p className="mt-1 whitespace-pre-wrap text-sm text-muted-foreground">{item.text}</p>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          </Card>
+
+          <Card>
+            <h2 className="text-lg font-bold">Internal notes</h2>
+            <div className="mt-4">
+              <TicketNotes ticketId={ticket.id} notes={notes} />
             </div>
           </Card>
         </div>

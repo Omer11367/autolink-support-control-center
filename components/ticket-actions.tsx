@@ -3,6 +3,7 @@
 import { Check, Send, X } from "lucide-react";
 import { useRouter } from "next/navigation";
 import { useState, useTransition } from "react";
+import { CopyButton } from "@/components/copy-button";
 import { Button, SecondaryButton, Textarea } from "@/components/ui";
 import { actionLabel, resolveCompletionMessage, type MarkActionType } from "@/lib/playbook";
 import type { ActionRecommendation } from "@/lib/operations";
@@ -102,6 +103,7 @@ export function TicketActions({ ticketId, clientUsername, clientChatId, telegram
       <div className="rounded-md border border-border bg-muted p-3">
         <p className="text-xs font-semibold uppercase text-muted-foreground">Message preview</p>
         <p className="mt-2 whitespace-pre-wrap text-sm">{previewMessage}</p>
+        {selectedAction !== "close" ? <div className="mt-3"><CopyButton value={previewMessage} label="Copy reply" /></div> : null}
         <dl className="mt-3 grid gap-2 text-xs text-muted-foreground sm:grid-cols-2">
           <div><dt className="font-semibold">Telegram call</dt><dd>{willCallTelegram ? "yes" : "no"}</dd></div>
           <div><dt className="font-semibold">Insert bot_responses</dt><dd>{willInsertBotResponse ? "yes, after Telegram result" : "no"}</dd></div>

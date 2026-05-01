@@ -1,12 +1,11 @@
 import Link from "next/link";
 import { EmptyState } from "@/components/empty-state";
-import { StatusBadge } from "@/components/status-badge";
 import { TicketFilters } from "@/components/ticket-filters";
+import { TicketsTable } from "@/components/tickets-table";
 import { Card } from "@/components/ui";
 import { getTickets } from "@/lib/tickets";
-import { formatDate, truncate } from "@/lib/utils";
-import { formatIntentLabel } from "@/lib/display";
 import { getEscalationState } from "@/lib/operations";
+import type { Ticket } from "@/lib/types";
 
 export const dynamic = "force-dynamic";
 
@@ -25,11 +24,43 @@ function uniqueStrings(values: Array<string | null | undefined>): string[] {
   );
 }
 
+function isPaymentTicket(ticket: Ticket) {
+  return ["deposit_funds", "payment_issue", "refund_request"].includes(ticket.intent ?? "");
+}
+
+function isUnresolved(ticket: Ticket) {
+  const status = (ticket.status ?? "unknown").toLowerCase();
+  return !["done", "resolved", "closed"].includes(status);
+}
+
+function sortedTickets(tickets: Ticket[], hasActiveFilter: boolean) {
+  if (hasActiveFilter) return tickets;
+
+  return [...tickets].sort((a, b) => {
+    const score = (ticket: Ticket) => {
+      const sla = getEscalationState(ticket);
+      const status = (ticket.status ?? "").toLowerCase();
+      if (sla === "urgent") return 0;
+      if (sla === "needs_attention") return 1;
+      if (status === "new" || status === "open") return 2;
+      if (status === "waiting_mark" || status === "waiting_for_mark") return 3;
+      return 4;
+    };
+    return score(a) - score(b);
+  });
+}
+
 export default async function TicketsPage({ searchParams }: TicketsPageProps) {
   const tickets = await getTickets(searchParams);
+  const hasActiveFilter = Boolean(searchParams.status || searchParams.intent || searchParams.priority || searchParams.search);
+  const visibleTickets = sortedTickets(tickets, hasActiveFilter);
   const statuses = uniqueStrings(tickets.map((t) => t.status));
   const intents = uniqueStrings(tickets.map((t) => t.intent));
   const priorities = uniqueStrings(tickets.map((t) => t.priority));
+  const newCount = tickets.filter((ticket) => ["new", "open"].includes((ticket.status ?? "").toLowerCase())).length;
+  const waitingCount = tickets.filter((ticket) => ["waiting_mark", "waiting_for_mark"].includes((ticket.status ?? "").toLowerCase())).length;
+  const urgentCount = tickets.filter((ticket) => getEscalationState(ticket) === "urgent").length;
+  const paymentCount = tickets.filter(isPaymentTicket).length;
 
   return (
     <div className="space-y-5">
@@ -37,6 +68,22 @@ export default async function TicketsPage({ searchParams }: TicketsPageProps) {
         <h1 className="text-2xl font-bold tracking-normal">Tickets</h1>
         <p className="mt-1 text-sm text-muted-foreground">Filter client requests, prioritize Mark actions, and open the full handling timeline.</p>
       </header>
+
+      <section className="grid gap-3 sm:grid-cols-2 xl:grid-cols-5">
+        <Card className="p-3"><p className="text-xs text-muted-foreground">Total visible</p><p className="mt-1 text-2xl font-bold">{tickets.length}</p></Card>
+        <Card className="p-3"><p className="text-xs text-muted-foreground">New</p><p className="mt-1 text-2xl font-bold">{newCount}</p></Card>
+        <Card className="p-3"><p className="text-xs text-muted-foreground">Waiting for Mark</p><p className="mt-1 text-2xl font-bold">{waitingCount}</p></Card>
+        <Card className="p-3"><p className="text-xs text-muted-foreground">Urgent SLA</p><p className="mt-1 text-2xl font-bold">{urgentCount}</p></Card>
+        <Card className="p-3"><p className="text-xs text-muted-foreground">Deposit/payment</p><p className="mt-1 text-2xl font-bold">{paymentCount}</p></Card>
+      </section>
+
+      <div className="flex flex-wrap gap-2">
+        <Link className="rounded-full border border-border bg-card px-3 py-2 text-sm font-semibold hover:bg-muted" href="/tickets?status=new">New</Link>
+        <Link className="rounded-full border border-border bg-card px-3 py-2 text-sm font-semibold hover:bg-muted" href="/tickets?status=waiting_for_mark">Waiting</Link>
+        <Link className="rounded-full border border-border bg-card px-3 py-2 text-sm font-semibold hover:bg-muted" href="/tickets?priority=urgent">Urgent</Link>
+        <Link className="rounded-full border border-border bg-card px-3 py-2 text-sm font-semibold hover:bg-muted" href="/tickets?intent=deposit_funds">Payments</Link>
+        <Link className="rounded-full border border-border bg-card px-3 py-2 text-sm font-semibold hover:bg-muted" href="/tickets?intent=other">Unknown/Other</Link>
+      </div>
 
       <TicketFilters statuses={statuses} intents={intents} priorities={priorities} />
 
@@ -46,50 +93,7 @@ export default async function TicketsPage({ searchParams }: TicketsPageProps) {
             <EmptyState title="No matching tickets" description="Adjust filters or seed incoming Telegram messages into the tickets table." />
           </div>
         ) : (
-          <div className="overflow-x-auto">
-            <table className="w-full min-w-[960px] text-left text-sm">
-              <thead className="border-b border-border bg-muted/40 text-xs uppercase text-muted-foreground">
-                <tr>
-                  <th className="px-4 py-3">Ticket</th>
-                  <th className="px-4 py-3">Client</th>
-                  <th className="px-4 py-3">Intent</th>
-                  <th className="px-4 py-3">Status</th>
-                  <th className="px-4 py-3">SLA</th>
-                  <th className="px-4 py-3">Priority</th>
-                  <th className="px-4 py-3">Created</th>
-                  <th className="px-4 py-3">Message</th>
-                  <th className="px-4 py-3">Action</th>
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-border">
-                {tickets.map((ticket) => (
-                  <tr key={ticket.id} className="transition hover:bg-muted/60">
-                    <td className="px-4 py-3 font-semibold">
-                      <Link href={`/tickets/${ticket.id}`}>{ticket.ticket_code ?? ticket.id.slice(0, 8)}</Link>
-                    </td>
-                    <td className="px-4 py-3">{ticket.client_username ?? "Unknown"}</td>
-                    <td className="px-4 py-3">{formatIntentLabel(ticket.intent)}</td>
-                    <td className="px-4 py-3"><StatusBadge value={ticket.status} /></td>
-                    <td className="px-4 py-3">
-                      {getEscalationState(ticket) === "urgent" ? (
-                        <StatusBadge value="urgent" type="priority" label="Urgent" />
-                      ) : getEscalationState(ticket) === "needs_attention" ? (
-                        <StatusBadge value="waiting_for_mark" label="Needs attention" />
-                      ) : (
-                        <StatusBadge value="normal" type="neutral" label="OK" />
-                      )}
-                    </td>
-                    <td className="px-4 py-3"><StatusBadge value={ticket.priority ?? "normal"} type="priority" /></td>
-                    <td className="px-4 py-3 text-muted-foreground">{formatDate(ticket.created_at)}</td>
-                    <td className="px-4 py-3 text-muted-foreground">{truncate(ticket.client_original_message, 110)}</td>
-                    <td className="px-4 py-3">
-                      <Link className="font-semibold text-primary hover:underline" href={`/tickets/${ticket.id}`}>Open</Link>
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
+          <TicketsTable tickets={visibleTickets.filter(isUnresolved).concat(visibleTickets.filter((ticket) => !isUnresolved(ticket)))} />
         )}
       </Card>
     </div>

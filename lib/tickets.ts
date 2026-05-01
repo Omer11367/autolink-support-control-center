@@ -1,5 +1,6 @@
 import "server-only";
 import { createSupabaseAdminClient, hasSupabaseServerEnv } from "@/lib/supabase/admin";
+import { getEscalationState } from "@/lib/operations";
 import type { BotResponse, DashboardStats, MarkAction, Message, PlaybookEntry, Ticket, TicketNote } from "@/lib/types";
 
 export type TicketFilters = {
@@ -19,7 +20,12 @@ function emptyDashboard(): DashboardStats {
     highPriorityTickets: 0,
     telegramSendErrors: 0,
     last24HoursTickets: 0,
+    waitingOver10Minutes: 0,
+    waitingOver30Minutes: 0,
+    paymentTickets: 0,
+    unknownIntentTickets: 0,
     recentTickets: [],
+    attentionTickets: [],
     topIntents: []
   };
 }
@@ -44,6 +50,11 @@ export async function getDashboardStats(): Promise<DashboardStats> {
     supabase.from("bot_responses").select("id", { count: "exact", head: true }).in("response_type", ["error", "failed", "telegram_error"]),
     supabase.from("tickets").select("id", { count: "exact", head: true }).gte("created_at", since24Hours)
   ]);
+  const { data: operationalRows, error: operationalError } = await supabase
+    .from("tickets")
+    .select("*")
+    .order("created_at", { ascending: true })
+    .limit(250);
 
   if (
     total.error ||
@@ -55,7 +66,8 @@ export async function getDashboardStats(): Promise<DashboardStats> {
     newTickets.error ||
     highPriorityTickets.error ||
     telegramErrors.error ||
-    last24Hours.error
+    last24Hours.error ||
+    operationalError
   ) {
     throw new Error(
       total.error?.message ??
@@ -67,7 +79,8 @@ export async function getDashboardStats(): Promise<DashboardStats> {
         newTickets.error?.message ??
         highPriorityTickets.error?.message ??
         telegramErrors.error?.message ??
-        last24Hours.error?.message
+        last24Hours.error?.message ??
+        operationalError?.message
     );
   }
 
@@ -82,6 +95,17 @@ export async function getDashboardStats(): Promise<DashboardStats> {
     .sort((a, b) => b.count - a.count)
     .slice(0, 6);
 
+  const operationalTickets = (operationalRows ?? []) as Ticket[];
+  const attentionTickets = operationalTickets
+    .filter((ticket) => getEscalationState(ticket) !== "none")
+    .sort((a, b) => {
+      const aState = getEscalationState(a);
+      const bState = getEscalationState(b);
+      if (aState === bState) return new Date(a.created_at ?? 0).getTime() - new Date(b.created_at ?? 0).getTime();
+      return aState === "urgent" ? -1 : 1;
+    })
+    .slice(0, 8);
+
   return {
     totalTickets: total.count ?? 0,
     waitingForMark: waiting.count ?? 0,
@@ -91,7 +115,12 @@ export async function getDashboardStats(): Promise<DashboardStats> {
     highPriorityTickets: highPriorityTickets.count ?? 0,
     telegramSendErrors: telegramErrors.count ?? 0,
     last24HoursTickets: last24Hours.count ?? 0,
+    waitingOver10Minutes: operationalTickets.filter((ticket) => getEscalationState(ticket) === "needs_attention").length,
+    waitingOver30Minutes: operationalTickets.filter((ticket) => getEscalationState(ticket) === "urgent").length,
+    paymentTickets: operationalTickets.filter((ticket) => ["deposit_funds", "payment_issue", "refund_request"].includes(ticket.intent ?? "")).length,
+    unknownIntentTickets: operationalTickets.filter((ticket) => !ticket.intent || ["unknown", "other"].includes(ticket.intent)).length,
     recentTickets: (recent.data ?? []) as Ticket[],
+    attentionTickets,
     topIntents
   };
 }

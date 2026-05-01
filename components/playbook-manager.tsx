@@ -65,6 +65,7 @@ function payloadFromForm(form: FormState) {
 export function PlaybookManager({ entries }: { entries: PlaybookEntry[] }) {
   const router = useRouter();
   const [query, setQuery] = useState("");
+  const [activeFilter, setActiveFilter] = useState<"all" | "active" | "inactive">("all");
   const [form, setForm] = useState<FormState>(emptyForm);
   const [notice, setNotice] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -72,9 +73,15 @@ export function PlaybookManager({ entries }: { entries: PlaybookEntry[] }) {
 
   const filtered = useMemo(() => {
     const term = query.trim().toLowerCase();
-    if (!term) return entries;
-    return entries.filter((entry) => `${entry.intent} ${entry.title} ${entry.description ?? ""}`.toLowerCase().includes(term));
-  }, [entries, query]);
+    return entries.filter((entry) => {
+      const matchesStatus =
+        activeFilter === "all" ||
+        (activeFilter === "active" && entry.is_active) ||
+        (activeFilter === "inactive" && !entry.is_active);
+      const matchesSearch = !term || `${entry.intent} ${entry.title} ${entry.description ?? ""}`.toLowerCase().includes(term);
+      return matchesStatus && matchesSearch;
+    });
+  }, [activeFilter, entries, query]);
 
   function update<K extends keyof FormState>(key: K, value: FormState[K]) {
     setForm((current) => ({ ...current, [key]: value }));
@@ -182,8 +189,20 @@ export function PlaybookManager({ entries }: { entries: PlaybookEntry[] }) {
       <div className="space-y-3">
         <label className="relative block">
           <Search className="pointer-events-none absolute left-3 top-3 h-4 w-4 text-muted-foreground" aria-hidden="true" />
-          <Input className="pl-9" value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search by intent or title" />
+          <Input className="pl-9" value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search intent, title, or description" />
         </label>
+        <div className="flex flex-wrap gap-2">
+          {(["all", "active", "inactive"] as const).map((filter) => (
+            <button
+              key={filter}
+              type="button"
+              onClick={() => setActiveFilter(filter)}
+              className={activeFilter === filter ? "rounded-full bg-primary px-3 py-2 text-xs font-semibold text-primary-foreground" : "rounded-full border border-border bg-card px-3 py-2 text-xs font-semibold text-muted-foreground hover:bg-muted"}
+            >
+              {filter[0].toUpperCase() + filter.slice(1)}
+            </button>
+          ))}
+        </div>
 
         {filtered.length === 0 ? (
           <Card className="text-sm text-muted-foreground">No playbook entries match this search.</Card>

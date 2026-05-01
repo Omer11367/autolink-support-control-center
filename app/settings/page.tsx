@@ -38,6 +38,15 @@ export default async function SettingsPage() {
   const geminiConfigured = Boolean(process.env.GEMINI_API_KEY);
   const markChatConfigured = Boolean(process.env.MARK_INTERNAL_CHAT_ID);
   const deploymentMode = process.env.VERCEL_ENV ?? process.env.NODE_ENV ?? "unknown";
+  const checks = [
+    supabaseUrlConfigured,
+    supabaseAnonConfigured,
+    serviceRoleConfigured,
+    telegramConfigured,
+    geminiConfigured,
+    markChatConfigured
+  ];
+  const readyCount = checks.filter(Boolean).length;
 
   return (
     <div className="space-y-5">
@@ -53,6 +62,14 @@ export default async function SettingsPage() {
             <h2 className="font-bold">Never expose API keys in the frontend</h2>
             <p className="mt-1 text-sm text-muted-foreground">Service role, Telegram token, and Gemini key must never be exposed to client components. This page checks presence, not values.</p>
           </div>
+        </div>
+      </Card>
+
+      <Card>
+        <h2 className="font-bold">Operational readiness</h2>
+        <p className="mt-2 text-3xl font-bold">{readyCount}/6 ready</p>
+        <div className="mt-3 h-2 overflow-hidden rounded-full bg-muted">
+          <div className="h-full rounded-full bg-primary" style={{ width: `${(readyCount / 6) * 100}%` }} />
         </div>
       </Card>
 

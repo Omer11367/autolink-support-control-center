@@ -86,6 +86,11 @@ export type DashboardStats = {
   highPriorityTickets: number;
   telegramSendErrors: number;
   last24HoursTickets: number;
+  waitingOver10Minutes: number;
+  waitingOver30Minutes: number;
+  paymentTickets: number;
+  unknownIntentTickets: number;
   recentTickets: Ticket[];
+  attentionTickets: Ticket[];
   topIntents: Array<{ intent: string; count: number }>;
 };
