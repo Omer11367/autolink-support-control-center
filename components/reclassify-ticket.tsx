@@ -5,9 +5,10 @@ import { useRouter } from "next/navigation";
 import { useState, useTransition } from "react";
 import { StatusBadge } from "@/components/status-badge";
 import { Button } from "@/components/ui";
+import { formatIntentLabel } from "@/lib/display";
 import type { ClassifiedIntent } from "@/lib/intent-classifier";
 
-export function ReclassifyTicket({ ticketId, messageText }: { ticketId: string; messageText: string }) {
+export function ReclassifyTicket({ ticketId, messageText, currentIntent }: { ticketId: string; messageText: string; currentIntent?: string | null }) {
   const router = useRouter();
   const [result, setResult] = useState<ClassifiedIntent | null>(null);
   const [message, setMessage] = useState<string | null>(null);
@@ -64,9 +65,15 @@ export function ReclassifyTicket({ ticketId, messageText }: { ticketId: string; 
       {result ? (
         <div className="rounded-md border border-border bg-muted p-3 text-sm">
           <div className="flex flex-wrap gap-2">
-            <StatusBadge value={result.intent} type="neutral" label={result.humanLabel} />
+            <StatusBadge value={currentIntent ?? "unknown"} type="neutral" label={`Current: ${formatIntentLabel(currentIntent)}`} />
+            <StatusBadge value={result.intent} type="neutral" label={`Detected: ${result.humanLabel}`} />
             <StatusBadge value={result.confidence} type="priority" label={`Confidence: ${result.confidence}`} />
           </div>
+          <div className="mt-3">
+            <p className="font-semibold">Extracted data preview</p>
+            <pre className="mt-1 max-h-56 overflow-auto rounded-md bg-background p-3 text-xs">{JSON.stringify(result.extractedData, null, 2)}</pre>
+          </div>
+          <p className="mt-3 font-semibold">Internal summary preview</p>
           <p className="mt-2 text-muted-foreground">{result.internalSummary}</p>
           <Button className="mt-3" onClick={applyReclassify} disabled={isPending}>
             Apply

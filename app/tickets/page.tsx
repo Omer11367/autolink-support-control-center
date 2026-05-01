@@ -6,6 +6,7 @@ import { Card } from "@/components/ui";
 import { getTickets } from "@/lib/tickets";
 import { formatDate, truncate } from "@/lib/utils";
 import { formatIntentLabel } from "@/lib/display";
+import { getEscalationState } from "@/lib/operations";
 
 export const dynamic = "force-dynamic";
 
@@ -53,6 +54,7 @@ export default async function TicketsPage({ searchParams }: TicketsPageProps) {
                   <th className="px-4 py-3">Client</th>
                   <th className="px-4 py-3">Intent</th>
                   <th className="px-4 py-3">Status</th>
+                  <th className="px-4 py-3">SLA</th>
                   <th className="px-4 py-3">Priority</th>
                   <th className="px-4 py-3">Created</th>
                   <th className="px-4 py-3">Message</th>
@@ -68,6 +70,15 @@ export default async function TicketsPage({ searchParams }: TicketsPageProps) {
                     <td className="px-4 py-3">{ticket.client_username ?? "Unknown"}</td>
                     <td className="px-4 py-3">{formatIntentLabel(ticket.intent)}</td>
                     <td className="px-4 py-3"><StatusBadge value={ticket.status} /></td>
+                    <td className="px-4 py-3">
+                      {getEscalationState(ticket) === "urgent" ? (
+                        <StatusBadge value="urgent" type="priority" label="Urgent" />
+                      ) : getEscalationState(ticket) === "needs_attention" ? (
+                        <StatusBadge value="waiting_for_mark" label="Needs attention" />
+                      ) : (
+                        <StatusBadge value="normal" type="neutral" label="OK" />
+                      )}
+                    </td>
                     <td className="px-4 py-3"><StatusBadge value={ticket.priority ?? "normal"} type="priority" /></td>
                     <td className="px-4 py-3 text-muted-foreground">{formatDate(ticket.created_at)}</td>
                     <td className="px-4 py-3 text-muted-foreground">{truncate(ticket.client_original_message, 110)}</td>

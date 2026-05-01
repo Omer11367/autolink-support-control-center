@@ -1,11 +1,13 @@
 import Link from "next/link";
 import { notFound } from "next/navigation";
-import { ArrowLeft, Bot, CheckCircle2, MessageSquare, UserRound } from "lucide-react";
+import { ArrowLeft, Bot, CheckCircle2, MessageSquare, StickyNote, UserRound } from "lucide-react";
 import { ReclassifyTicket } from "@/components/reclassify-ticket";
 import { StatusBadge } from "@/components/status-badge";
 import { TicketActions } from "@/components/ticket-actions";
+import { TicketNotes } from "@/components/ticket-notes";
 import { Card } from "@/components/ui";
 import { formatIntentLabel, getDefaultCompletionForIntent } from "@/lib/display";
+import { getActionRecommendation, getEscalationState } from "@/lib/operations";
 import { getTicketDetail } from "@/lib/tickets";
 import { formatDate, prettyJson } from "@/lib/utils";
 import type { Json } from "@/lib/types";
@@ -23,8 +25,11 @@ function readExtractedValue(data: Json | null, keys: string[]): string | null {
 }
 
 export default async function TicketDetailPage({ params }: { params: { id: string } }) {
-  const { ticket, messages, actions, botResponses } = await getTicketDetail(params.id);
+  const { ticket, messages, actions, botResponses, notes } = await getTicketDetail(params.id);
   if (!ticket) notFound();
+  const recommendation = getActionRecommendation(ticket);
+  const escalationState = getEscalationState(ticket);
+  const telegramConfigured = Boolean(process.env.TELEGRAM_BOT_TOKEN);
   const highlightedData = [
     ["BM ID", readExtractedValue(ticket.extracted_data, ["bmId", "bmIds", "bm_id"])],
     ["Ad accounts", readExtractedValue(ticket.extracted_data, ["adAccountIds", "accountIds", "ad_account_ids"])],
@@ -51,14 +56,20 @@ export default async function TicketDetailPage({ params }: { params: { id: strin
     ...botResponses.map((response) => ({
       at: response.created_at,
       icon: Bot,
-      title: response.response_type ?? "Bot response",
+      title: response.response_type === "telegram_error" ? "Telegram send failure" : "Bot response sent",
       text: response.response_text
     })),
     ...actions.map((action) => ({
       at: action.created_at,
       icon: CheckCircle2,
-      title: `Mark action: ${action.action_type}`,
+      title: action.action_type === "reclassify" ? "Classifier/reclassification event" : `Mark action: ${action.action_type}`,
       text: action.action_text
+    })),
+    ...notes.map((note) => ({
+      at: note.created_at,
+      icon: StickyNote,
+      title: "Internal note added",
+      text: note.note_text
     }))
   ].filter((item) => item.text).sort((a, b) => new Date(a.at ?? 0).getTime() - new Date(b.at ?? 0).getTime());
 
@@ -81,6 +92,8 @@ export default async function TicketDetailPage({ params }: { params: { id: strin
           <StatusBadge value={ticket.priority ?? "normal"} type="priority" />
           <StatusBadge value={ticket.intent ?? "unknown"} type="neutral" label={formatIntentLabel(ticket.intent)} />
           {ticket.needs_mark ? <StatusBadge value="waiting_for_mark" label="Needs Mark" /> : null}
+          {escalationState === "urgent" ? <StatusBadge value="urgent" type="priority" label="Urgent" /> : null}
+          {escalationState === "needs_attention" ? <StatusBadge value="waiting_for_mark" label="Needs attention" /> : null}
         </div>
       </header>
 
@@ -141,6 +154,28 @@ export default async function TicketDetailPage({ params }: { params: { id: strin
 
         <div className="space-y-4">
           <Card>
+            <h2 className="text-lg font-bold">Smart recommendation</h2>
+            <div className="mt-3 space-y-3 text-sm">
+              <div className="flex flex-wrap gap-2">
+                <StatusBadge value={recommendation.riskLevel} type="priority" label={`Risk: ${recommendation.riskLevel}`} />
+                <StatusBadge value={recommendation.action} type="neutral" label={recommendation.label} />
+              </div>
+              <div>
+                <p className="font-semibold">Recommended next action</p>
+                <p className="mt-1 text-muted-foreground">{recommendation.label}</p>
+              </div>
+              <div>
+                <p className="font-semibold">Why</p>
+                <p className="mt-1 text-muted-foreground">{recommendation.reason}</p>
+              </div>
+              <div>
+                <p className="font-semibold">Suggested reply preview</p>
+                <p className="mt-1 whitespace-pre-wrap rounded-md bg-muted p-3">{recommendation.suggestedReply}</p>
+              </div>
+            </div>
+          </Card>
+
+          <Card>
             <h2 className="text-lg font-bold">Ticket details</h2>
             <dl className="mt-4 space-y-3 text-sm">
               <div className="flex justify-between gap-4"><dt className="text-muted-foreground">Client</dt><dd className="font-medium">{ticket.client_username ?? "Unknown"}</dd></div>
@@ -165,7 +200,14 @@ export default async function TicketDetailPage({ params }: { params: { id: strin
             <h2 className="text-lg font-bold">Reclassify</h2>
             <p className="mt-1 text-sm text-muted-foreground">Preview local classifier output before applying it to the ticket.</p>
             <div className="mt-4">
-              <ReclassifyTicket ticketId={ticket.id} messageText={ticket.client_original_message ?? ""} />
+              <ReclassifyTicket ticketId={ticket.id} messageText={ticket.client_original_message ?? ""} currentIntent={ticket.intent} />
+            </div>
+          </Card>
+
+          <Card>
+            <h2 className="text-lg font-bold">Internal notes</h2>
+            <div className="mt-4">
+              <TicketNotes ticketId={ticket.id} notes={notes} />
             </div>
           </Card>
 
@@ -173,7 +215,13 @@ export default async function TicketDetailPage({ params }: { params: { id: strin
             <h2 className="text-lg font-bold">Actions</h2>
             <p className="mt-1 text-sm text-muted-foreground">Actions are saved to mark_actions. Telegram sends only from the server when configured.</p>
             <div className="mt-4">
-              <TicketActions ticketId={ticket.id} clientUsername={ticket.client_username} />
+              <TicketActions
+                ticketId={ticket.id}
+                clientUsername={ticket.client_username}
+                clientChatId={ticket.client_chat_id}
+                telegramConfigured={telegramConfigured}
+                recommendation={recommendation}
+              />
             </div>
           </Card>
         </div>

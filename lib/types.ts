@@ -45,6 +45,13 @@ export type BotResponse = {
   created_at: string | null;
 };
 
+export type TicketNote = {
+  id: string;
+  ticket_id: string;
+  note_text: string;
+  created_at: string | null;
+};
+
 export type Message = {
   id: string;
   telegram_message_id: string | number | null;

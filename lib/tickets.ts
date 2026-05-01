@@ -1,6 +1,6 @@
 import "server-only";
 import { createSupabaseAdminClient, hasSupabaseServerEnv } from "@/lib/supabase/admin";
-import type { BotResponse, DashboardStats, MarkAction, Message, PlaybookEntry, Ticket } from "@/lib/types";
+import type { BotResponse, DashboardStats, MarkAction, Message, PlaybookEntry, Ticket, TicketNote } from "@/lib/types";
 
 export type TicketFilters = {
   status?: string;
@@ -124,7 +124,8 @@ export async function getTicketDetail(id: string) {
       ticket: null,
       messages: [] as Message[],
       actions: [] as MarkAction[],
-      botResponses: [] as BotResponse[]
+      botResponses: [] as BotResponse[],
+      notes: [] as TicketNote[]
     };
   }
 
@@ -133,7 +134,7 @@ export async function getTicketDetail(id: string) {
   if (ticketError) throw new Error(ticketError.message);
 
   const typedTicket = ticket as Ticket;
-  const [messages, actions, botResponses] = await Promise.all([
+  const [messages, actions, botResponses, notes] = await Promise.all([
     supabase
       .from("messages")
       .select("*")
@@ -141,7 +142,8 @@ export async function getTicketDetail(id: string) {
       .order("created_at", { ascending: true })
       .limit(20),
     supabase.from("mark_actions").select("*").eq("ticket_id", id).order("created_at", { ascending: true }),
-    supabase.from("bot_responses").select("*").eq("ticket_id", id).order("created_at", { ascending: true })
+    supabase.from("bot_responses").select("*").eq("ticket_id", id).order("created_at", { ascending: true }),
+    supabase.from("ticket_notes").select("*").eq("ticket_id", id).order("created_at", { ascending: true })
   ]);
 
   if (messages.error || actions.error || botResponses.error) {
@@ -152,7 +154,8 @@ export async function getTicketDetail(id: string) {
     ticket: typedTicket,
     messages: (messages.data ?? []) as Message[],
     actions: (actions.data ?? []) as MarkAction[],
-    botResponses: (botResponses.data ?? []) as BotResponse[]
+    botResponses: (botResponses.data ?? []) as BotResponse[],
+    notes: notes.error ? [] : ((notes.data ?? []) as TicketNote[])
   };
 }
 

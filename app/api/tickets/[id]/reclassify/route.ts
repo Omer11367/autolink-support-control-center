@@ -40,6 +40,18 @@ export async function POST(_request: Request, { params }: { params: { id: string
       return NextResponse.json({ error: updateError.message }, { status: 500 });
     }
 
+    await supabase.from("mark_actions").insert({
+      ticket_id: params.id,
+      mark_telegram_user_id: null,
+      mark_username: "dashboard_admin",
+      action_type: "reclassify",
+      action_text: `Reclassified from ${ticket.intent ?? "unknown"} to ${result.intent}`,
+      raw_payload: {
+        source: "control_center",
+        classifier_result: result
+      }
+    });
+
     return NextResponse.json({ ok: true, result });
   } catch (error) {
     return NextResponse.json(
