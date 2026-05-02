@@ -32,37 +32,96 @@ function removeDuplicateValues(primary: string[], valuesToRemove: string[]): str
   return primary.filter((value) => !blocked.has(value.toLowerCase()));
 }
 
-function splitLabeledValues(rawValue: string): string[] {
-  return rawValue
-    .split(/(?:,|\n|\s+and\s+|\s*&\s*)/i)
-    .map((value) => value.trim().replace(/^[^A-Za-z0-9]+|[^A-Za-z0-9_-]+$/g, ""))
+function cleanToken(value: string): string {
+  return value.trim().replace(/^[^A-Za-z0-9]+|[^A-Za-z0-9_-]+$/g, "");
+}
+
+function tokenKey(value: string): string {
+  return cleanToken(value).toLowerCase();
+}
+
+function isAccountLabel(tokens: string[], index: number): number {
+  const current = tokenKey(tokens[index] ?? "");
+  const next = tokenKey(tokens[index + 1] ?? "");
+
+  if (current === "ad" && (next === "account" || next === "accounts")) return 2;
+  if (["account", "accounts", "acc", "accs"].includes(current)) return 1;
+
+  return 0;
+}
+
+function isBmLabel(tokens: string[], index: number): number {
+  const current = tokenKey(tokens[index] ?? "");
+  const next = tokenKey(tokens[index + 1] ?? "");
+
+  if (current === "business" && next === "manager") return 2;
+  if (current === "bm") return 1;
+
+  return 0;
+}
+
+function splitValueToken(token: string): string[] {
+  return token
+    .split(/[,;&]+/)
+    .map(cleanToken)
     .filter(Boolean);
 }
 
-function extractAfterLabels(message: string, pattern: RegExp): string[] {
+function collectValuesAfterLabel(tokens: string[], startIndex: number, labelType: "account" | "bm"): string[] {
   const values: string[] = [];
-  let match: RegExpExecArray | null;
+  let index = startIndex;
 
-  while ((match = pattern.exec(message)) !== null) {
-    values.push(...splitLabeledValues(match[1] ?? ""));
+  while (index < tokens.length) {
+    const key = tokenKey(tokens[index] ?? "");
+    const accountLabelLength = isAccountLabel(tokens, index);
+    const bmLabelLength = isBmLabel(tokens, index);
+    const isOtherLabel = labelType === "account" ? bmLabelLength > 0 : accountLabelLength > 0;
+    const isAccessWord = ["full", "partial", "view", "access", "admin", "management", "limited"].includes(key);
+    const isConnector = ["to", "into", "for", "from", "with", "please", "pls"].includes(key);
+
+    if (isOtherLabel || isAccessWord) break;
+    if (isConnector && values.length > 0) break;
+    if (isConnector) {
+      index += 1;
+      continue;
+    }
+
+    const tokenValues = splitValueToken(tokens[index] ?? "");
+    if (tokenValues.length === 0) break;
+
+    values.push(...tokenValues);
+    index += 1;
   }
 
-  return uniqueValues(values);
+  return values;
 }
 
 function parseMirrorEntities(message: string) {
-  const adAccountValues = extractAfterLabels(
-    message,
-    /\b(?:ad\s+accounts?|accounts?|accs?|acc)\b\s*[:#-]?\s+(.+?)(?=\s+\b(?:to|into|for|with|bm|business\s+manager|full|partial|view|access)\b|[.!?]?$|$)/gi
-  );
-  const bmValues = extractAfterLabels(
-    message,
-    /\b(?:bm|business\s+manager)\b\s*[:#-]?\s+(.+?)(?=\s+\b(?:with|for|account|accounts|ad\s+account|acc|full|partial|view|access)\b|[.!?]?$|$)/gi
-  );
+  const tokens = message.split(/\s+/).filter(Boolean);
+  const adAccountValues: string[] = [];
+  const bmValues: string[] = [];
+
+  for (let index = 0; index < tokens.length; index += 1) {
+    const accountLabelLength = isAccountLabel(tokens, index);
+    if (accountLabelLength > 0) {
+      adAccountValues.push(...collectValuesAfterLabel(tokens, index + accountLabelLength, "account"));
+      index += accountLabelLength - 1;
+      continue;
+    }
+
+    const bmLabelLength = isBmLabel(tokens, index);
+    if (bmLabelLength > 0) {
+      bmValues.push(...collectValuesAfterLabel(tokens, index + bmLabelLength, "bm"));
+      index += bmLabelLength - 1;
+    }
+  }
+
+  const uniqueAdAccountValues = uniqueValues(adAccountValues);
+  const uniqueBmValues = uniqueValues(bmValues);
 
   return {
-    adAccountValues: removeDuplicateValues(adAccountValues, bmValues),
-    bmValues: removeDuplicateValues(bmValues, adAccountValues)
+    adAccountValues: removeDuplicateValues(uniqueAdAccountValues, uniqueBmValues),
+    bmValues: removeDuplicateValues(uniqueBmValues, uniqueAdAccountValues)
   };
 }
 
@@ -78,10 +137,15 @@ export function buildGuardianMirrorMessage(message: string, previousContext = ""
   const parsedEntities = parseMirrorEntities(cleanMessage);
   const fallbackBmValues = toStringList(classification.extractedData.bmIds);
   const fallbackAdAccountValues = removeDuplicateValues(toStringList(classification.extractedData.adAccountIds), fallbackBmValues);
+  const hasLabeledShareEntities = parsedEntities.adAccountValues.length > 0 && parsedEntities.bmValues.length > 0;
   const bmIds = joinList(parsedEntities.bmValues) || joinList(fallbackBmValues);
   const adAccountIds = joinList(parsedEntities.adAccountValues) || joinList(fallbackAdAccountValues);
   const accountNames = joinList(classification.extractedData.accountNames);
   const access = classification.accessLevel !== "not_specified" ? classification.accessLevel : "";
+
+  if (classification.intent === "share_ad_account" && !hasLabeledShareEntities) {
+    return cleanMessage;
+  }
 
   if (classification.intent === "share_ad_account" && (adAccountIds || accountNames) && bmIds) {
     const accountPart = adAccountIds || accountNames;
