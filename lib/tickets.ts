@@ -1,4 +1,5 @@
 import "server-only";
+import { unstable_noStore as noStore } from "next/cache";
 import { createSupabaseAdminClient, hasSupabaseServerEnv } from "@/lib/supabase/admin";
 import { getEscalationState } from "@/lib/operations";
 import type { BotResponse, DashboardStats, MarkAction, Message, PlaybookEntry, Ticket, TicketNote } from "@/lib/types";
@@ -31,6 +32,7 @@ function emptyDashboard(): DashboardStats {
 }
 
 export async function getDashboardStats(): Promise<DashboardStats> {
+  noStore();
   if (!hasSupabaseServerEnv()) return emptyDashboard();
 
   const supabase = createSupabaseAdminClient();
@@ -53,7 +55,7 @@ export async function getDashboardStats(): Promise<DashboardStats> {
   const { data: operationalRows, error: operationalError } = await supabase
     .from("tickets")
     .select("*")
-    .order("created_at", { ascending: true })
+    .order("created_at", { ascending: false })
     .limit(250);
 
   if (
@@ -126,6 +128,7 @@ export async function getDashboardStats(): Promise<DashboardStats> {
 }
 
 export async function getTickets(filters: TicketFilters): Promise<Ticket[]> {
+  noStore();
   if (!hasSupabaseServerEnv()) return [] as Ticket[];
 
   const supabase = createSupabaseAdminClient();
@@ -148,6 +151,7 @@ export async function getTickets(filters: TicketFilters): Promise<Ticket[]> {
 }
 
 export async function getTicketDetail(id: string) {
+  noStore();
   if (!hasSupabaseServerEnv()) {
     return {
       ticket: null,
@@ -189,6 +193,7 @@ export async function getTicketDetail(id: string) {
 }
 
 export async function getPlaybookEntries() {
+  noStore();
   if (!hasSupabaseServerEnv()) return [] as PlaybookEntry[];
   const supabase = createSupabaseAdminClient();
   const { data, error } = await supabase.from("playbook_entries").select("*").order("intent", { ascending: true });
@@ -201,6 +206,7 @@ function uniqueNonEmptyStrings(values: Array<string | null | undefined>): string
 }
 
 export async function getDistinctTicketValues(field: "status" | "intent" | "priority"): Promise<string[]> {
+  noStore();
   if (!hasSupabaseServerEnv()) return [] as string[];
   const supabase = createSupabaseAdminClient();
 

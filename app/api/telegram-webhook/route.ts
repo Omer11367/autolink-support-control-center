@@ -131,9 +131,6 @@ export async function POST(request: Request) {
       return NextResponse.json({ ok: true, ignored: "empty_message" });
     }
 
-    const classification = classifyIntent(text);
-    const guardianMessage = buildGuardianMirrorMessage(text) ?? text;
-
     const { data: storedMessage, error: messageError } = await supabase
       .from("messages")
       .insert({
@@ -153,6 +150,9 @@ export async function POST(request: Request) {
       throw new Error(`Supabase messages insert failed: ${messageError.message}`);
     }
     console.log("telegram-message-saved", { chatId, messageId: message.message_id, rowId: storedMessage?.id });
+
+    const classification = classifyIntent(text);
+    const guardianMessage = buildGuardianMirrorMessage(text) ?? text;
 
     const { data: ticket, error: ticketError } = await supabase
       .from("tickets")
@@ -199,6 +199,7 @@ export async function POST(request: Request) {
       console.error("supabase-update-error", { table: "tickets", message: ticketMessageIdsError.message });
       throw new Error(`Supabase tickets update failed: ${ticketMessageIdsError.message}`);
     }
+    console.log("telegram-ticket-message-ids-updated", { ticketId: ticket?.id, holdingMessageId, guardianMessageId });
 
     const { error: botResponsesError } = await supabase.from("bot_responses").insert([
       {
@@ -221,6 +222,7 @@ export async function POST(request: Request) {
       console.error("supabase-insert-error", { table: "bot_responses", message: botResponsesError.message });
       throw new Error(`Supabase bot_responses insert failed: ${botResponsesError.message}`);
     }
+    console.log("telegram-bot-responses-saved", { ticketId: ticket?.id });
 
     return NextResponse.json({ ok: true });
   } catch (error) {

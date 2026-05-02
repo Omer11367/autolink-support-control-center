@@ -79,6 +79,48 @@ export default async function DashboardPage() {
           </div>
         )}
       </Card>
+
+      <Card className="p-0">
+        <div className="border-b border-border p-4">
+          <h2 className="text-lg font-bold">Recent tickets</h2>
+        </div>
+        {stats.recentTickets.length === 0 ? (
+          <div className="p-4">
+            <EmptyState title="No recent tickets" description="New Telegram tickets will appear here after refresh." />
+          </div>
+        ) : (
+          <div className="overflow-x-auto">
+            <table className="w-full min-w-[760px] text-left text-sm">
+              <thead className="border-b border-border bg-muted/50 text-xs uppercase text-muted-foreground">
+                <tr>
+                  <th className="px-4 py-3">Ticket</th>
+                  <th className="px-4 py-3">Intent</th>
+                  <th className="px-4 py-3">Status</th>
+                  <th className="px-4 py-3">Message</th>
+                  <th className="px-4 py-3">Open</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-border">
+                {stats.recentTickets.map((ticket) => (
+                  <tr key={ticket.id} className="hover:bg-muted/60">
+                    <td className="px-4 py-3 font-semibold">{ticket.ticket_code ?? ticket.id.slice(0, 8)}</td>
+                    <td className="px-4 py-3">{formatIntentLabel(ticket.intent)}</td>
+                    <td className="px-4 py-3"><StatusBadge value={ticket.status} /></td>
+                    <td className="max-w-md px-4 py-3 text-muted-foreground">
+                      <span className="block truncate">{truncate(ticket.client_original_message, 120)}</span>
+                    </td>
+                    <td className="px-4 py-3">
+                      <Link className="font-semibold text-primary hover:underline" href={`/tickets/${ticket.id}`}>
+                        Open
+                      </Link>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </Card>
     </div>
   );
 }
