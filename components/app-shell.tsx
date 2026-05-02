@@ -1,6 +1,6 @@
 "use client";
 
-import { Bot, BookOpen, FlaskConical, Gauge, Inbox, Library, Settings } from "lucide-react";
+import { BookOpen, FlaskConical, Gauge, Inbox, Library, Settings } from "lucide-react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { useEffect, useState } from "react";
@@ -28,19 +28,16 @@ export function AppShell({ children }: { children: React.ReactNode }) {
 
   return (
     <div className="min-h-screen bg-background md:grid md:grid-cols-[280px_1fr]">
-      <aside className="border-b border-border bg-card/95 md:min-h-screen md:border-b-0 md:border-r">
+      <aside className="border-b border-border bg-[#0a0a0a]/95 md:min-h-screen md:border-b-0 md:border-r">
         <div className="px-5 py-5">
-          <div className="flex items-center gap-3">
-            <div className="flex h-11 w-11 items-center justify-center rounded-lg bg-primary text-primary-foreground shadow-panel">
-              <Bot className="h-5 w-5" aria-hidden="true" />
+          <div>
+            <div className="font-sans text-[28px] font-black lowercase leading-none tracking-tight text-white">
+              autolink
             </div>
-            <div>
-              <div className="text-sm font-bold">Autolink</div>
-              <div className="text-xs text-muted-foreground">Support Control Center</div>
-            </div>
+            <div className="mt-1 text-xs font-medium text-zinc-400">Support Control Center</div>
           </div>
           <div className="mt-4 flex flex-wrap gap-2 text-xs">
-            <span className="rounded-full border border-success/30 bg-success/10 px-2 py-1 font-semibold text-emerald-700 dark:text-emerald-200">Production</span>
+            <span className="rounded-full border border-success/30 bg-success/10 px-2 py-1 font-semibold text-emerald-200">Production</span>
             <span className="rounded-full border border-border bg-muted px-2 py-1 font-semibold text-muted-foreground">Vercel</span>
           </div>
         </div>
@@ -54,7 +51,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
                 href={item.href}
                 className={cn(
                   "flex min-h-11 shrink-0 items-center gap-3 rounded-lg px-3 py-2 text-sm font-medium transition",
-                  active ? "bg-primary text-primary-foreground shadow-panel" : "text-muted-foreground hover:bg-muted hover:text-foreground"
+                  active ? "bg-zinc-100 text-zinc-950 shadow-panel" : "text-zinc-400 hover:bg-zinc-900 hover:text-zinc-100"
                 )}
               >
                 <Icon className="h-4 w-4" aria-hidden="true" />

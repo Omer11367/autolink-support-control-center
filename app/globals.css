@@ -3,13 +3,13 @@
 @tailwind utilities;
 
 :root {
-  --background: 210 20% 98%;
-  --foreground: 222 47% 11%;
-  --muted: 210 18% 92%;
-  --muted-foreground: 215 16% 44%;
-  --border: 214 18% 84%;
-  --card: 0 0% 100%;
-  --primary: 221 83% 53%;
+  --background: 0 0% 4%;
+  --foreground: 210 20% 96%;
+  --muted: 0 0% 11%;
+  --muted-foreground: 215 12% 66%;
+  --border: 0 0% 18%;
+  --card: 0 0% 8%;
+  --primary: 210 12% 92%;
   --primary-foreground: 0 0% 100%;
   --danger: 0 72% 51%;
   --success: 160 84% 39%;
@@ -18,14 +18,14 @@
 
 @media (prefers-color-scheme: dark) {
   :root {
-    --background: 222 47% 7%;
+    --background: 0 0% 4%;
     --foreground: 210 20% 96%;
-    --muted: 222 25% 15%;
-    --muted-foreground: 215 16% 68%;
-    --border: 222 20% 22%;
-    --card: 222 35% 10%;
-    --primary: 213 94% 68%;
-    --primary-foreground: 222 47% 8%;
+    --muted: 0 0% 11%;
+    --muted-foreground: 215 12% 66%;
+    --border: 0 0% 18%;
+    --card: 0 0% 8%;
+    --primary: 210 12% 92%;
+    --primary-foreground: 0 0% 5%;
     --danger: 0 84% 60%;
     --success: 160 84% 45%;
     --warning: 42 96% 55%;
@@ -42,7 +42,9 @@ html {
 
 body {
   min-height: 100%;
-  background: hsl(var(--background));
+  background:
+    radial-gradient(circle at top left, hsl(0 0% 16% / 0.32), transparent 32rem),
+    hsl(var(--background));
   color: hsl(var(--foreground));
 }
 

@@ -147,6 +147,7 @@ export default async function TicketDetailPage({ params }: { params: { id: strin
   const escalationState = getEscalationState(ticket);
   const clientDisplayName = getClientDisplayName(ticket.client_username, ticket.client_chat_id, messages);
   const isShareTicket = ticket.intent === "share_ad_account" || ticket.intent === "share_account";
+  const hidesPayment = isShareTicket || ticket.intent === "verify_account" || ticket.intent === "check_account_status" || ticket.intent === "account_status_check";
   const shareEntities = isShareTicket ? extractShareEntities(ticket.client_original_message) : null;
   const bmValue = shareEntities?.bmIds.length ? shareEntities.bmIds.join(", ") : readExtractedValue(ticket.extracted_data, ["bmId", "bmIds", "bm_id"]);
   const adAccountValue = shareEntities?.adAccountIds.length
@@ -158,7 +159,7 @@ export default async function TicketDetailPage({ params }: { params: { id: strin
     ["Ad accounts", adAccountValue],
     ["Account names", readExtractedValue(ticket.extracted_data, ["accountNames", "account_names"])],
     ["Access level", accessLevel === "not_specified" ? null : accessLevel],
-    ["Amount/payment", isShareTicket ? null : readExtractedValue(ticket.extracted_data, ["amountOrPayment", "amount", "payment"])],
+    ["Amount/payment", hidesPayment ? null : readExtractedValue(ticket.extracted_data, ["amountOrPayment", "amount", "payment"])],
     ["Account type", readExtractedValue(ticket.extracted_data, ["accountType", "account_type"])],
     ["Dates/report range", readExtractedValue(ticket.extracted_data, ["reportRange", "dateRange", "dates"])]
   ].filter((item): item is [string, string] => Boolean(item[1]));

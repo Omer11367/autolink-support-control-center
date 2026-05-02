@@ -252,9 +252,34 @@ function extractAccessLevel(text: string): AccessLevel {
   return "not_specified";
 }
 
+function hasPaymentContext(text: string): boolean {
+  return /\b(payment|deposit|sent|paid|funds?|usdt|usd|dollars?|top\s*up|transferred)\b|\$/i.test(text);
+}
+
+function hasAccountContextNear(text: string, start: number, end: number): boolean {
+  const before = text.slice(Math.max(0, start - 40), start).toLowerCase();
+  const after = text.slice(end, Math.min(text.length, end + 40)).toLowerCase();
+  const nearby = `${before} ${after}`;
+
+  return /\b(account|accounts|ad account|acc|bm|check|verify|verification|status|card)\b/.test(nearby);
+}
+
 function extractAmount(text: string): string | null {
-  const match = text.match(/(?:\$|usdt|usd)?\s?\d+(?:[,.]\d+)?\s?(?:usdt|usd|\$)?/i);
-  return match?.[0]?.trim() ?? null;
+  if (!hasPaymentContext(text)) return null;
+
+  const matches = text.matchAll(/(?:\$|usd\s*)?\d+(?:[,.]\d+)?\s*(?:k|K)?\s*(?:usdt|usd|dollars?|\$)?/gi);
+
+  for (const match of matches) {
+    const value = match[0]?.trim();
+    if (!value) continue;
+
+    const hasCurrencySignal = /[$]|usdt|usd|dollars?/i.test(value);
+    if (!hasCurrencySignal && hasAccountContextNear(text, match.index ?? 0, (match.index ?? 0) + value.length)) continue;
+
+    return value.replace(/\s+/g, " ");
+  }
+
+  return null;
 }
 
 function extractReportRange(text: string): string | null {
@@ -315,7 +340,7 @@ export function classifyIntent(message: string, previousContext = ""): Classifie
   const adAccountIds = labeledShareEntities?.adAccountIds ?? extractNumbersNear(combined, ["account", "ad account", "acc"]);
   const accountNames = extractAccountNames(combined);
   const accessLevel = extractAccessLevel(combined);
-  const amount = intent === "share_ad_account" ? null : extractAmount(combined);
+  const amount = ["share_ad_account", "verify_account", "check_account_status"].includes(intent) ? null : extractAmount(combined);
   const reportRange = extractReportRange(combined);
 
   const extractedData: Record<string, unknown> = {
