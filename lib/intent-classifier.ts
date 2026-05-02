@@ -135,6 +135,111 @@ function extractNumbersNear(text: string, keywords: string[]): string[] {
   return Array.from(numbers);
 }
 
+function uniqueStrings(values: string[]): string[] {
+  const seen = new Set<string>();
+  const result: string[] = [];
+
+  for (const value of values) {
+    const key = value.toLowerCase();
+    if (!seen.has(key)) {
+      seen.add(key);
+      result.push(value);
+    }
+  }
+
+  return result;
+}
+
+function cleanEntityToken(value: string): string {
+  return value.trim().replace(/^[^A-Za-z0-9]+|[^A-Za-z0-9_-]+$/g, "");
+}
+
+function tokenKey(value: string): string {
+  return cleanEntityToken(value).toLowerCase();
+}
+
+function isAccountLabel(tokens: string[], index: number): number {
+  const current = tokenKey(tokens[index] ?? "");
+  const next = tokenKey(tokens[index + 1] ?? "");
+
+  if (current === "ad" && (next === "account" || next === "accounts")) return 2;
+  if (["account", "accounts", "acc", "accs"].includes(current)) return 1;
+
+  return 0;
+}
+
+function isBmLabel(tokens: string[], index: number): number {
+  const current = tokenKey(tokens[index] ?? "");
+  const next = tokenKey(tokens[index + 1] ?? "");
+
+  if (current === "business" && next === "manager") return 2;
+  if (current === "bm") return 1;
+
+  return 0;
+}
+
+function collectLabeledValues(tokens: string[], startIndex: number, labelType: "account" | "bm"): string[] {
+  const values: string[] = [];
+  let index = startIndex;
+
+  while (index < tokens.length) {
+    const key = tokenKey(tokens[index] ?? "");
+    const accountLabelLength = isAccountLabel(tokens, index);
+    const bmLabelLength = isBmLabel(tokens, index);
+    const isOtherLabel = labelType === "account" ? bmLabelLength > 0 : accountLabelLength > 0;
+    const isStopWord = ["to", "into", "for", "from", "with", "full", "partial", "view", "access", "admin", "management", "limited"].includes(key);
+
+    if (isOtherLabel || (isStopWord && values.length > 0)) break;
+    if (isStopWord) {
+      index += 1;
+      continue;
+    }
+
+    const tokenValues = (tokens[index] ?? "")
+      .split(/[,;&]+/)
+      .map(cleanEntityToken)
+      .filter(Boolean);
+
+    if (tokenValues.length === 0) break;
+
+    values.push(...tokenValues);
+    index += 1;
+  }
+
+  return values;
+}
+
+function extractLabeledShareEntities(message: string): { bmIds: string[]; adAccountIds: string[] } {
+  const tokens = message.split(/\s+/).filter(Boolean);
+  const bmIds: string[] = [];
+  const adAccountIds: string[] = [];
+
+  for (let index = 0; index < tokens.length; index += 1) {
+    const accountLabelLength = isAccountLabel(tokens, index);
+    if (accountLabelLength > 0) {
+      adAccountIds.push(...collectLabeledValues(tokens, index + accountLabelLength, "account"));
+      index += accountLabelLength - 1;
+      continue;
+    }
+
+    const bmLabelLength = isBmLabel(tokens, index);
+    if (bmLabelLength > 0) {
+      bmIds.push(...collectLabeledValues(tokens, index + bmLabelLength, "bm"));
+      index += bmLabelLength - 1;
+    }
+  }
+
+  const uniqueBmIds = uniqueStrings(bmIds);
+  const uniqueAdAccountIds = uniqueStrings(adAccountIds);
+  const bmSet = new Set(uniqueBmIds.map((value) => value.toLowerCase()));
+  const adAccountSet = new Set(uniqueAdAccountIds.map((value) => value.toLowerCase()));
+
+  return {
+    bmIds: uniqueBmIds.filter((value) => !adAccountSet.has(value.toLowerCase())),
+    adAccountIds: uniqueAdAccountIds.filter((value) => !bmSet.has(value.toLowerCase()))
+  };
+}
+
 function extractAccountNames(message: string): string[] {
   const matches = message.match(/\b\d{3,5}\s*-\s*\d{3,8}\s*-\s*[a-z0-9-]+\s*-\s*[a-z0-9-]+\b/gi);
   return matches ?? [];
@@ -205,20 +310,21 @@ export function classifyIntent(message: string, previousContext = ""): Classifie
     ? best.matched.map((phrase) => `Matched phrase: ${phrase}`)
     : ["No specific rule matched. Forward as general support."];
 
-  const bmIds = extractNumbersNear(combined, ["bm", "business manager"]);
-  const adAccountIds = extractNumbersNear(combined, ["account", "ad account", "acc"]);
+  const labeledShareEntities = intent === "share_ad_account" ? extractLabeledShareEntities(combined) : null;
+  const bmIds = labeledShareEntities?.bmIds ?? extractNumbersNear(combined, ["bm", "business manager"]);
+  const adAccountIds = labeledShareEntities?.adAccountIds ?? extractNumbersNear(combined, ["account", "ad account", "acc"]);
   const accountNames = extractAccountNames(combined);
   const accessLevel = extractAccessLevel(combined);
-  const amount = extractAmount(combined);
+  const amount = intent === "share_ad_account" ? null : extractAmount(combined);
   const reportRange = extractReportRange(combined);
 
   const extractedData: Record<string, unknown> = {
     bmIds,
     adAccountIds,
-    accountNames,
-    accessLevel
+    accountNames
   };
 
+  if (accessLevel !== "not_specified") extractedData.accessLevel = accessLevel;
   if (amount) extractedData.amountOrPayment = amount;
   if (reportRange) extractedData.reportRange = reportRange;
 

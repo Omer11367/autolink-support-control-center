@@ -25,6 +25,100 @@ function readExtractedValue(data: Json | null, keys: string[]): string | null {
   return null;
 }
 
+function cleanEntityToken(value: string): string {
+  return value.trim().replace(/^[^A-Za-z0-9]+|[^A-Za-z0-9_-]+$/g, "");
+}
+
+function tokenKey(value: string): string {
+  return cleanEntityToken(value).toLowerCase();
+}
+
+function isAccountLabel(tokens: string[], index: number): number {
+  const current = tokenKey(tokens[index] ?? "");
+  const next = tokenKey(tokens[index + 1] ?? "");
+
+  if (current === "ad" && (next === "account" || next === "accounts")) return 2;
+  if (["account", "accounts", "acc", "accs"].includes(current)) return 1;
+
+  return 0;
+}
+
+function isBmLabel(tokens: string[], index: number): number {
+  const current = tokenKey(tokens[index] ?? "");
+  const next = tokenKey(tokens[index + 1] ?? "");
+
+  if (current === "business" && next === "manager") return 2;
+  if (current === "bm") return 1;
+
+  return 0;
+}
+
+function collectLabeledValues(tokens: string[], startIndex: number, labelType: "account" | "bm"): string[] {
+  const values: string[] = [];
+  let index = startIndex;
+
+  while (index < tokens.length) {
+    const key = tokenKey(tokens[index] ?? "");
+    const accountLabelLength = isAccountLabel(tokens, index);
+    const bmLabelLength = isBmLabel(tokens, index);
+    const isOtherLabel = labelType === "account" ? bmLabelLength > 0 : accountLabelLength > 0;
+    const isStopWord = ["to", "into", "for", "from", "with", "full", "partial", "view", "access", "admin", "management", "limited"].includes(key);
+
+    if (isOtherLabel || (isStopWord && values.length > 0)) break;
+    if (isStopWord) {
+      index += 1;
+      continue;
+    }
+
+    const tokenValues = (tokens[index] ?? "")
+      .split(/[,;&]+/)
+      .map(cleanEntityToken)
+      .filter(Boolean);
+
+    if (tokenValues.length === 0) break;
+
+    values.push(...tokenValues);
+    index += 1;
+  }
+
+  return values;
+}
+
+function uniqueStrings(values: string[]): string[] {
+  return Array.from(new Set(values.filter(Boolean)));
+}
+
+function extractShareEntities(message: string | null): { bmIds: string[]; adAccountIds: string[] } {
+  const tokens = (message ?? "").split(/\s+/).filter(Boolean);
+  const bmIds: string[] = [];
+  const adAccountIds: string[] = [];
+
+  for (let index = 0; index < tokens.length; index += 1) {
+    const accountLabelLength = isAccountLabel(tokens, index);
+    if (accountLabelLength > 0) {
+      adAccountIds.push(...collectLabeledValues(tokens, index + accountLabelLength, "account"));
+      index += accountLabelLength - 1;
+      continue;
+    }
+
+    const bmLabelLength = isBmLabel(tokens, index);
+    if (bmLabelLength > 0) {
+      bmIds.push(...collectLabeledValues(tokens, index + bmLabelLength, "bm"));
+      index += bmLabelLength - 1;
+    }
+  }
+
+  const uniqueBmIds = uniqueStrings(bmIds);
+  const uniqueAdAccountIds = uniqueStrings(adAccountIds);
+  const bmSet = new Set(uniqueBmIds.map((value) => value.toLowerCase()));
+  const adAccountSet = new Set(uniqueAdAccountIds.map((value) => value.toLowerCase()));
+
+  return {
+    bmIds: uniqueBmIds.filter((value) => !adAccountSet.has(value.toLowerCase())),
+    adAccountIds: uniqueAdAccountIds.filter((value) => !bmSet.has(value.toLowerCase()))
+  };
+}
+
 function readChatTitleFromMessage(message: Message): string | null {
   const payload = message.raw_payload;
   if (!payload || typeof payload !== "object" || Array.isArray(payload)) return null;
@@ -52,12 +146,19 @@ export default async function TicketDetailPage({ params }: { params: { id: strin
   const recommendation = getActionRecommendation(ticket);
   const escalationState = getEscalationState(ticket);
   const clientDisplayName = getClientDisplayName(ticket.client_username, ticket.client_chat_id, messages);
+  const isShareTicket = ticket.intent === "share_ad_account" || ticket.intent === "share_account";
+  const shareEntities = isShareTicket ? extractShareEntities(ticket.client_original_message) : null;
+  const bmValue = shareEntities?.bmIds.length ? shareEntities.bmIds.join(", ") : readExtractedValue(ticket.extracted_data, ["bmId", "bmIds", "bm_id"]);
+  const adAccountValue = shareEntities?.adAccountIds.length
+    ? shareEntities.adAccountIds.join(", ")
+    : readExtractedValue(ticket.extracted_data, ["adAccountIds", "accountIds", "ad_account_ids"]);
+  const accessLevel = readExtractedValue(ticket.extracted_data, ["accessLevel", "access_level"]);
   const highlightedData = [
-    ["BM ID", readExtractedValue(ticket.extracted_data, ["bmId", "bmIds", "bm_id"])],
-    ["Ad accounts", readExtractedValue(ticket.extracted_data, ["adAccountIds", "accountIds", "ad_account_ids"])],
+    ["BM ID", bmValue],
+    ["Ad accounts", adAccountValue],
     ["Account names", readExtractedValue(ticket.extracted_data, ["accountNames", "account_names"])],
-    ["Access level", readExtractedValue(ticket.extracted_data, ["accessLevel", "access_level"])],
-    ["Amount/payment", readExtractedValue(ticket.extracted_data, ["amountOrPayment", "amount", "payment"])],
+    ["Access level", accessLevel === "not_specified" ? null : accessLevel],
+    ["Amount/payment", isShareTicket ? null : readExtractedValue(ticket.extracted_data, ["amountOrPayment", "amount", "payment"])],
     ["Account type", readExtractedValue(ticket.extracted_data, ["accountType", "account_type"])],
     ["Dates/report range", readExtractedValue(ticket.extracted_data, ["reportRange", "dateRange", "dates"])]
   ].filter((item): item is [string, string] => Boolean(item[1]));
