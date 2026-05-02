@@ -1,5 +1,4 @@
 import { formatIntentLabel } from "./display";
-import { HOLDING_RESPONSES } from "./intent-library";
 
 export type AccessLevel = "full" | "partial" | "view" | "not_specified";
 
@@ -28,7 +27,7 @@ type IntentRule = {
 const RULES: IntentRule[] = [
   {
     intent: "share_ad_account",
-    phrases: ["share", "add", "connect", "give access", "grant access", "attach", "link", "add acc to bm"],
+    phrases: ["share", "share account", "share accounts", "add", "connect", "give access", "grant access", "attach", "link", "add acc to bm"],
     completionOptions: ["Done", "Already shared", "Only view access"]
   },
   {
@@ -48,7 +47,7 @@ const RULES: IntentRule[] = [
   },
   {
     intent: "deposit_funds",
-    phrases: ["paid", "payment done", "deposit", "funds sent", "transferred", "top up", "usdt", "sent money"],
+    phrases: ["paid", "payment done", "deposit", "funds sent", "transferred", "top up", "usdt", "sent money", "dollar", "usd", "please check payment"],
     completionOptions: ["Funds arrived", "Handled"],
     note: "Never confirm funds automatically."
   },
@@ -59,7 +58,7 @@ const RULES: IntentRule[] = [
   },
   {
     intent: "request_accounts",
-    phrases: ["request accounts", "need accounts", "new accounts", "more accounts"],
+    phrases: ["request accounts", "need account", "need accounts", "new account", "new accounts", "more account", "more accounts"],
     completionOptions: ["Done", "Handled"]
   },
   {
@@ -75,7 +74,7 @@ const RULES: IntentRule[] = [
   },
   {
     intent: "check_account_status",
-    phrases: ["status", "active", "blocked", "disabled", "usable", "can run ads"],
+    phrases: ["status", "check status", "account status", "active", "blocked", "disabled", "usable", "can run ads"],
     completionOptions: ["Handled"]
   },
   {
@@ -97,6 +96,16 @@ const RULES: IntentRule[] = [
 ];
 
 const REACTION_ONLY = /^[\s\u{1F44D}\u2764\uFE0F\u2705\u{1F64F}]+$/u;
+const SIMPLE_ACK_ONLY = /^(?:ok|okay|thanks|thank you|ty|yes|no|wait|one sec|one second|sec|noted|got it|received|sure|alright|all good)[.!\s]*$/i;
+
+const SAFE_HOLDING_RESPONSES = [
+  "Got it, checking this now.",
+  "Thanks, I'll check and update you shortly.",
+  "Received, I'm checking with the team now.",
+  "Understood, I'll update you once I have confirmation.",
+  "Sure, I'll check this and get back to you shortly."
+];
+const HOLDING_RESPONSES = SAFE_HOLDING_RESPONSES;
 
 function includesPhrase(text: string, phrase: string): boolean {
   return text.includes(phrase);
@@ -148,19 +157,22 @@ function extractReportRange(text: string): string | null {
   return match?.[0] ?? null;
 }
 
-function chooseHoldingMessage(message: string): string {
-  const index = Math.abs(message.length) % HOLDING_RESPONSES.length;
+function chooseHoldingMessage(): string {
+  // Keep holding replies varied, short, and safe: no manual action is confirmed here.
+  const index = Math.floor(Math.random() * SAFE_HOLDING_RESPONSES.length);
   return HOLDING_RESPONSES[index] ?? "Hello! Let me check on this and I’ll get back to you shortly.";
 }
 
 export function classifyIntent(message: string, previousContext = ""): ClassifiedIntent {
   const combined = `${previousContext}\n${message}`.trim();
   const normalized = combined.toLowerCase();
+  const currentMessage = message.trim();
 
-  if (message.trim() && REACTION_ONLY.test(message.trim())) {
+  // Noise-only messages should not create meaningful Mark work.
+  if (currentMessage && (REACTION_ONLY.test(currentMessage) || SIMPLE_ACK_ONLY.test(currentMessage))) {
     return {
-      intent: "other",
-      humanLabel: formatIntentLabel("other"),
+      intent: "no_action",
+      humanLabel: formatIntentLabel("no_action"),
       confidence: "high",
       requiresMark: false,
       shouldReply: false,
@@ -168,9 +180,9 @@ export function classifyIntent(message: string, previousContext = ""): Classifie
       extractedData: {},
       accessLevel: "not_specified",
       holdingMessage: "",
-      internalSummary: "Emoji reaction only. Close conversation with no reply.",
+      internalSummary: "Simple acknowledgement only. No reply or Mark action needed.",
       completionOptions: ["Close"],
-      matchedRules: ["Emoji reaction closes conversation with no reply."]
+      matchedRules: ["Simple acknowledgement or emoji reaction closes conversation with no reply."]
     };
   }
 
@@ -179,11 +191,19 @@ export function classifyIntent(message: string, previousContext = ""): Classifie
     return { rule, matched, score: matched.length };
   }).sort((a, b) => b.score - a.score);
 
-  const best = ranked.find((entry) => entry.score > 0);
-  const intent = best?.rule.intent ?? "other";
+  const inferredRequestAccounts = /\b(?:need|request|want|more)\s+\d+\s+(?:ad\s+)?accounts?\b/i.test(combined);
+  const best = ranked.find((entry) => entry.score > 0) ??
+    (inferredRequestAccounts
+      ? {
+          rule: RULES.find((rule) => rule.intent === "request_accounts") ?? RULES[0],
+          matched: ["numbered account request"],
+          score: 1
+        }
+      : undefined);
+  const intent = best?.rule.intent ?? "general_support";
   const matchedRules = best
     ? best.matched.map((phrase) => `Matched phrase: ${phrase}`)
-    : ["No specific rule matched. Fallback to other."];
+    : ["No specific rule matched. Forward as general support."];
 
   const bmIds = extractNumbersNear(combined, ["bm", "business manager"]);
   const adAccountIds = extractNumbersNear(combined, ["account", "ad account", "acc"]);
@@ -203,7 +223,7 @@ export function classifyIntent(message: string, previousContext = ""): Classifie
   if (reportRange) extractedData.reportRange = reportRange;
 
   const confidence = best ? (best.score > 1 ? "high" : "medium") : "low";
-  const requiresMark = intent !== "other";
+  const requiresMark = intent !== "no_action";
   const holdingMessage = requiresMark ? chooseHoldingMessage(combined) : "Hello! Let me check on this and I’ll get back to you shortly.";
   const humanLabel = formatIntentLabel(intent);
   const note = best?.rule.note ? ` ${best.rule.note}` : "";
@@ -228,7 +248,7 @@ export function classifyIntent(message: string, previousContext = ""): Classifie
     closeConversation: false,
     extractedData,
     accessLevel,
-    holdingMessage,
+    holdingMessage: requiresMark ? holdingMessage : "",
     internalSummary,
     completionOptions: best?.rule.completionOptions ?? ["Handled", "Close"],
     matchedRules

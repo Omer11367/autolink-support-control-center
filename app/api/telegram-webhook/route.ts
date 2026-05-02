@@ -134,7 +134,8 @@ export async function POST(request: Request) {
     const classification = classifyIntent(text);
     const guardianMessage = buildGuardianMirrorMessage(text) ?? text;
 
-    const holdingMessageId = await sendTelegramMessage(botToken, chatId, HOLDING_MESSAGE);
+    const holdingMessage = classification.holdingMessage || HOLDING_MESSAGE;
+    const holdingMessageId = await sendTelegramMessage(botToken, chatId, holdingMessage);
     const guardianMessageId = await sendTelegramMessage(botToken, markGroupChatId, guardianMessage);
 
     const { data: storedMessage, error: messageError } = await supabase
@@ -188,7 +189,7 @@ export async function POST(request: Request) {
         telegram_chat_id: chatId,
         telegram_message_id: holdingMessageId ?? null,
         response_type: "holding",
-        response_text: HOLDING_MESSAGE
+        response_text: holdingMessage
       },
       {
         ticket_id: ticket?.id ?? null,

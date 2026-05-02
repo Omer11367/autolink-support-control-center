@@ -1,6 +1,7 @@
 import { classifyIntent } from "./intent-classifier";
 
 const EMOJI_ONLY_PATTERN = /^[\s\u{1F44D}\u2764\uFE0F\u2705\u{1F64F}]+$/u;
+const SIMPLE_ACK_PATTERN = /^(?:ok|okay|thanks|thank you|ty|yes|no|wait|one sec|one second|sec|noted|got it|received|sure|alright|all good)[.!\s]*$/i;
 
 function joinList(values: unknown): string {
   if (!Array.isArray(values)) return "";
@@ -77,9 +78,10 @@ function collectValuesAfterLabel(tokens: string[], startIndex: number, labelType
     const bmLabelLength = isBmLabel(tokens, index);
     const isOtherLabel = labelType === "account" ? bmLabelLength > 0 : accountLabelLength > 0;
     const isAccessWord = ["full", "partial", "view", "access", "admin", "management", "limited"].includes(key);
+    const isRequestWord = ["status", "check", "active", "blocked", "disabled", "usable", "available", "availability"].includes(key);
     const isConnector = ["to", "into", "for", "from", "with", "please", "pls"].includes(key);
 
-    if (isOtherLabel || isAccessWord) break;
+    if (isOtherLabel || isAccessWord || isRequestWord) break;
     if (isConnector && values.length > 0) break;
     if (isConnector) {
       index += 1;
@@ -126,7 +128,26 @@ function parseMirrorEntities(message: string) {
 }
 
 export function shouldIgnoreTelegramMessage(message: string): boolean {
-  return EMOJI_ONLY_PATTERN.test(message.trim());
+  const cleanMessage = message.trim();
+  return EMOJI_ONLY_PATTERN.test(cleanMessage) || SIMPLE_ACK_PATTERN.test(cleanMessage);
+}
+
+function extractPaymentAmount(message: string): string | null {
+  const match = message.match(/(?:\$|usd\s*)?\d+(?:[,.]\d+)?\s*(?:dollars?|usd|usdt|\$)?/i);
+  if (!match?.[0]) return null;
+
+  const value = match[0].trim();
+  const number = value.match(/\d+(?:[,.]\d+)?/)?.[0];
+  if (!number) return null;
+
+  if (/\$/.test(value)) return `$${number}`;
+  if (/\busdt\b/i.test(value)) return `${number} USDT`;
+  return `$${number}`;
+}
+
+function extractRequestedAccountCount(message: string): string | null {
+  const match = message.match(/\b(?:need|request|add|want|more)\s+(\d+)\s+(?:ad\s+)?accounts?\b/i);
+  return match?.[1] ?? null;
 }
 
 export function buildGuardianMirrorMessage(message: string, previousContext = ""): string | null {
@@ -134,6 +155,8 @@ export function buildGuardianMirrorMessage(message: string, previousContext = ""
   if (!cleanMessage || shouldIgnoreTelegramMessage(cleanMessage)) return null;
 
   const classification = classifyIntent(cleanMessage, previousContext);
+  if (!classification.shouldReply || classification.intent === "no_action") return null;
+
   const parsedEntities = parseMirrorEntities(cleanMessage);
   const fallbackBmValues = toStringList(classification.extractedData.bmIds);
   const fallbackAdAccountValues = removeDuplicateValues(toStringList(classification.extractedData.adAccountIds), fallbackBmValues);
@@ -143,6 +166,7 @@ export function buildGuardianMirrorMessage(message: string, previousContext = ""
   const accountNames = joinList(classification.extractedData.accountNames);
   const access = classification.accessLevel !== "not_specified" ? classification.accessLevel : "";
 
+  // Guardian messages should read like normal human requests: no ticket codes, labels, or JSON.
   if (classification.intent === "share_ad_account" && !hasLabeledShareEntities) {
     return cleanMessage;
   }
@@ -164,7 +188,8 @@ export function buildGuardianMirrorMessage(message: string, previousContext = ""
   }
 
   if (classification.intent === "deposit_funds") {
-    return `Please check whether the client payment/funds have arrived.`;
+    const amount = extractPaymentAmount(cleanMessage);
+    return amount ? `Client sent ${amount}, please check and confirm.` : "Client says payment was sent, please check and confirm.";
   }
 
   if (classification.intent === "check_availability") {
@@ -177,6 +202,18 @@ export function buildGuardianMirrorMessage(message: string, previousContext = ""
 
   if (classification.intent === "check_policy") {
     return `Please check whether this offer/domain can run.`;
+  }
+
+  if (classification.intent === "request_accounts") {
+    const accountCount = extractRequestedAccountCount(cleanMessage);
+    return accountCount
+      ? `Client needs ${accountCount} ad account${accountCount === "1" ? "" : "s"}. Please confirm availability.`
+      : "Client needs new ad accounts. Please confirm availability.";
+  }
+
+  if (classification.intent === "check_account_status") {
+    const accountPart = adAccountIds || accountNames;
+    return accountPart ? `Please check the status of ad account ${accountPart}.` : "Please check the status of the mentioned ad account.";
   }
 
   return cleanMessage;
