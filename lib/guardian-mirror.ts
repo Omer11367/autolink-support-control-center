@@ -1,4 +1,4 @@
-import { classifyIntent } from "@/lib/intent-classifier";
+import { classifyIntent } from "./intent-classifier";
 
 const EMOJI_ONLY_PATTERN = /^[\s\u{1F44D}\u2764\uFE0F\u2705\u{1F64F}]+$/u;
 

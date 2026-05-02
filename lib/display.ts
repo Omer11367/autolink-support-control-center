@@ -1,4 +1,4 @@
-import { INTENT_LIBRARY } from "@/lib/intent-library";
+import { INTENT_LIBRARY } from "./intent-library";
 
 export const INTENT_LABELS: Record<string, string> = {
   share_ad_account: "Share Ad Account",

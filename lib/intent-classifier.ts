@@ -1,5 +1,5 @@
-import { formatIntentLabel } from "@/lib/display";
-import { HOLDING_RESPONSES } from "@/lib/intent-library";
+import { formatIntentLabel } from "./display";
+import { HOLDING_RESPONSES } from "./intent-library";
 
 export type AccessLevel = "full" | "partial" | "view" | "not_specified";
 
