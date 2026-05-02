@@ -13,6 +13,14 @@ import type { Json, Message } from "@/lib/types";
 
 export const dynamic = "force-dynamic";
 
+type DetectedAction = {
+  type: string;
+  account?: string;
+  accounts?: string[];
+  bm?: string;
+  amount?: string;
+};
+
 function readExtractedValue(data: Json | null, keys: string[]): string | null {
   if (!data || typeof data !== "object" || Array.isArray(data)) return null;
 
@@ -23,6 +31,36 @@ function readExtractedValue(data: Json | null, keys: string[]): string | null {
   }
 
   return null;
+}
+
+function readDetectedActions(data: Json | null): DetectedAction[] {
+  if (!data || typeof data !== "object" || Array.isArray(data)) return [];
+  const actions = data.actions;
+  if (!Array.isArray(actions)) return [];
+
+  const detectedActions: DetectedAction[] = [];
+
+  for (const action of actions) {
+    if (!action || typeof action !== "object" || Array.isArray(action) || typeof action.type !== "string") continue;
+
+    detectedActions.push({
+      type: action.type,
+      account: typeof action.account === "string" ? action.account : undefined,
+      accounts: Array.isArray(action.accounts) ? action.accounts.map(String).filter(Boolean) : undefined,
+      bm: typeof action.bm === "string" ? action.bm : undefined,
+      amount: typeof action.amount === "string" ? action.amount : undefined
+    });
+  }
+
+  return detectedActions;
+}
+
+function formatActionType(type: string): string {
+  return type
+    .split("_")
+    .filter(Boolean)
+    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+    .join(" ");
 }
 
 function cleanEntityToken(value: string): string {
@@ -147,22 +185,26 @@ export default async function TicketDetailPage({ params }: { params: { id: strin
   const escalationState = getEscalationState(ticket);
   const clientDisplayName = getClientDisplayName(ticket.client_username, ticket.client_chat_id, messages);
   const isShareTicket = ticket.intent === "share_ad_account" || ticket.intent === "share_account";
-  const hidesPayment = isShareTicket || ticket.intent === "verify_account" || ticket.intent === "check_account_status" || ticket.intent === "account_status_check";
   const shareEntities = isShareTicket ? extractShareEntities(ticket.client_original_message) : null;
   const bmValue = shareEntities?.bmIds.length ? shareEntities.bmIds.join(", ") : readExtractedValue(ticket.extracted_data, ["bmId", "bmIds", "bm_id"]);
   const adAccountValue = shareEntities?.adAccountIds.length
     ? shareEntities.adAccountIds.join(", ")
     : readExtractedValue(ticket.extracted_data, ["adAccountIds", "accountIds", "ad_account_ids"]);
-  const accessLevel = readExtractedValue(ticket.extracted_data, ["accessLevel", "access_level"]);
-  const highlightedData = [
-    ["BM ID", bmValue],
-    ["Ad accounts", adAccountValue],
-    ["Account names", readExtractedValue(ticket.extracted_data, ["accountNames", "account_names"])],
-    ["Access level", accessLevel === "not_specified" ? null : accessLevel],
-    ["Amount/payment", hidesPayment ? null : readExtractedValue(ticket.extracted_data, ["amountOrPayment", "amount", "payment"])],
-    ["Account type", readExtractedValue(ticket.extracted_data, ["accountType", "account_type"])],
-    ["Dates/report range", readExtractedValue(ticket.extracted_data, ["reportRange", "dateRange", "dates"])]
-  ].filter((item): item is [string, string] => Boolean(item[1]));
+  const amountValue = readExtractedValue(ticket.extracted_data, ["amountOrPayment", "amount", "payment"]);
+  const storedActions = readDetectedActions(ticket.extracted_data);
+  const fallbackActions: DetectedAction[] = [];
+
+  if (isShareTicket && (adAccountValue || bmValue)) {
+    fallbackActions.push({ type: "share_account", account: adAccountValue ?? undefined, bm: bmValue ?? undefined });
+  } else if (["deposit_funds", "payment_check", "payment_issue"].includes(ticket.intent ?? "") && amountValue) {
+    fallbackActions.push({ type: "payment_check", amount: amountValue });
+  } else if (["verify_account"].includes(ticket.intent ?? "") && adAccountValue) {
+    fallbackActions.push({ type: "verify_account", account: adAccountValue });
+  } else if (["check_account_status", "account_status_check"].includes(ticket.intent ?? "") && adAccountValue) {
+    fallbackActions.push({ type: "account_status_check", account: adAccountValue });
+  }
+
+  const detectedActions = storedActions.length > 0 ? storedActions : fallbackActions;
 
   return (
     <div className="space-y-5">
@@ -215,18 +257,44 @@ export default async function TicketDetailPage({ params }: { params: { id: strin
           </Card>
 
           <Card>
-            <h2 className="text-lg font-bold">Extracted data</h2>
-            {highlightedData.length > 0 ? (
-              <div className="mt-3 grid gap-2 sm:grid-cols-2">
-                {highlightedData.map(([label, value]) => (
-                  <div key={label} className="rounded-md border border-border bg-muted p-3 text-sm">
-                    <p className="text-xs font-semibold uppercase text-muted-foreground">{label}</p>
-                    <p className="mt-1">{value}</p>
+            <h2 className="text-lg font-bold">Detected actions</h2>
+            {detectedActions.length > 0 ? (
+              <div className="mt-3 space-y-3">
+                {detectedActions.map((action, index) => (
+                  <div key={`${action.type}-${index}`} className="rounded-md border border-border bg-muted p-3 text-sm">
+                    <p className="text-xs font-semibold uppercase text-muted-foreground">Action</p>
+                    <p className="mt-1 font-semibold">{formatActionType(action.type)}</p>
+                    <dl className="mt-3 space-y-2">
+                      {action.amount ? (
+                        <div>
+                          <dt className="text-xs uppercase text-muted-foreground">Amount</dt>
+                          <dd>{action.amount}</dd>
+                        </div>
+                      ) : null}
+                      {action.account ? (
+                        <div>
+                          <dt className="text-xs uppercase text-muted-foreground">Account</dt>
+                          <dd>{action.account}</dd>
+                        </div>
+                      ) : null}
+                      {Array.isArray(action.accounts) && action.accounts.length > 0 ? (
+                        <div>
+                          <dt className="text-xs uppercase text-muted-foreground">Accounts</dt>
+                          <dd>{action.accounts.join(", ")}</dd>
+                        </div>
+                      ) : null}
+                      {action.bm ? (
+                        <div>
+                          <dt className="text-xs uppercase text-muted-foreground">BM</dt>
+                          <dd>{action.bm}</dd>
+                        </div>
+                      ) : null}
+                    </dl>
                   </div>
                 ))}
               </div>
             ) : (
-              <p className="mt-3 rounded-md bg-muted p-4 text-sm text-muted-foreground">No extracted data yet.</p>
+              <p className="mt-3 rounded-md bg-muted p-4 text-sm text-muted-foreground">No detected actions yet.</p>
             )}
           </Card>
         </div>

@@ -17,6 +17,14 @@ export type ClassifiedIntent = {
   matchedRules: string[];
 };
 
+type DetectedAction = {
+  type: "share_account" | "unshare_account" | "payment_check" | "verify_account" | "account_status_check" | "general_support";
+  account?: string;
+  accounts?: string[];
+  bm?: string;
+  amount?: string;
+};
+
 type IntentRule = {
   intent: string;
   phrases: string[];
@@ -187,7 +195,7 @@ function collectLabeledValues(tokens: string[], startIndex: number, labelType: "
     const accountLabelLength = isAccountLabel(tokens, index);
     const bmLabelLength = isBmLabel(tokens, index);
     const isOtherLabel = labelType === "account" ? bmLabelLength > 0 : accountLabelLength > 0;
-    const isStopWord = ["to", "into", "for", "from", "with", "full", "partial", "view", "access", "admin", "management", "limited"].includes(key);
+    const isStopWord = ["to", "into", "for", "from", "with", "full", "partial", "view", "access", "admin", "management", "limited", "need", "needs", "verify", "verification", "check", "status", "card"].includes(key);
 
     if (isOtherLabel || (isStopWord && values.length > 0)) break;
     if (isStopWord) {
@@ -240,6 +248,79 @@ function extractLabeledShareEntities(message: string): { bmIds: string[]; adAcco
   };
 }
 
+function addAction(actions: DetectedAction[], action: DetectedAction) {
+  const key = JSON.stringify(action).toLowerCase();
+  const exists = actions.some((item) => JSON.stringify(item).toLowerCase() === key);
+  if (!exists) actions.push(action);
+}
+
+function firstAccountValue(values: string[]): string | undefined {
+  return values.find(Boolean);
+}
+
+function extractAccountList(message: string): string[] {
+  const lineValues = message
+    .split(/\r?\n/)
+    .map((line) => cleanEntityToken(line))
+    .filter((line) => /^[A-Za-z0-9_-]{5,}$/.test(line));
+
+  if (lineValues.length > 1) return uniqueStrings(lineValues);
+
+  return uniqueStrings([
+    ...extractLabeledShareEntities(message).adAccountIds,
+    ...extractNumbersNear(message, ["account", "ad account", "acc", "verify", "status", "check"])
+  ]);
+}
+
+function extractShareActions(message: string): DetectedAction[] {
+  const actions: DetectedAction[] = [];
+  const shareMatch = message.match(/\b(?:share|add|connect|link|attach)\b[\s\S]*?\b(?:ad\s+)?accounts?\s+([A-Za-z0-9_-]+)[\s\S]*?\b(?:to|into)\s+(?:bm|business\s+manager)\s+([A-Za-z0-9_-]+)/i);
+  const fallbackShare = extractLabeledShareEntities(message);
+  const sharedAccount = cleanEntityToken(shareMatch?.[1] ?? firstAccountValue(fallbackShare.adAccountIds) ?? "");
+  const shareBm = cleanEntityToken(shareMatch?.[2] ?? firstAccountValue(fallbackShare.bmIds) ?? "");
+
+  if (sharedAccount && shareBm && /\b(?:share|add|connect|link|attach)\b/i.test(message)) {
+    addAction(actions, { type: "share_account", account: sharedAccount, bm: shareBm });
+  }
+
+  const unshareMatch = message.match(/\b(?:unshare|remove|disconnect|unlink|revoke)\b(?:[\s\S]*?\b(?:ad\s+)?accounts?\s+([A-Za-z0-9_-]+))?[\s\S]*?\b(?:from\s+)?(?:bm|business\s+manager)\s+([A-Za-z0-9_-]+)/i);
+  const unshareAccount = cleanEntityToken(unshareMatch?.[1] ?? sharedAccount);
+  const unshareBm = cleanEntityToken(unshareMatch?.[2] ?? "");
+
+  if (unshareAccount && unshareBm) {
+    addAction(actions, { type: "unshare_account", account: unshareAccount, bm: unshareBm });
+  }
+
+  return actions;
+}
+
+function detectActions(message: string, intent: string, amount: string | null): DetectedAction[] {
+  const actions: DetectedAction[] = [];
+  const accounts = extractAccountList(message);
+
+  for (const action of extractShareActions(message)) {
+    addAction(actions, action);
+  }
+
+  if (amount) {
+    addAction(actions, { type: "payment_check", amount });
+  }
+
+  if (/\b(verify|verification|card)\b/i.test(message) && accounts.length > 0) {
+    addAction(actions, accounts.length > 1 ? { type: "verify_account", accounts } : { type: "verify_account", account: accounts[0] });
+  }
+
+  if (/\b(status|active|blocked|disabled|usable|can run ads)\b/i.test(message) && accounts.length > 0) {
+    addAction(actions, accounts.length > 1 ? { type: "account_status_check", accounts } : { type: "account_status_check", account: accounts[0] });
+  }
+
+  if (actions.length === 0 && intent === "general_support") {
+    addAction(actions, { type: "general_support" });
+  }
+
+  return actions;
+}
+
 function extractAccountNames(message: string): string[] {
   const matches = message.match(/\b\d{3,5}\s*-\s*\d{3,8}\s*-\s*[a-z0-9-]+\s*-\s*[a-z0-9-]+\b/gi);
   return matches ?? [];
@@ -264,6 +345,14 @@ function hasAccountContextNear(text: string, start: number, end: number): boolea
   return /\b(account|accounts|ad account|acc|bm|check|verify|verification|status|card)\b/.test(nearby);
 }
 
+function hasPaymentContextNear(text: string, start: number, end: number): boolean {
+  const before = text.slice(Math.max(0, start - 40), start).toLowerCase();
+  const after = text.slice(end, Math.min(text.length, end + 40)).toLowerCase();
+  const nearby = `${before} ${after}`;
+
+  return /\b(payment|deposit|sent|paid|funds?|usdt|usd|dollars?|top\s*up|transferred)\b|\$/.test(nearby);
+}
+
 function extractAmount(text: string): string | null {
   if (!hasPaymentContext(text)) return null;
 
@@ -274,7 +363,9 @@ function extractAmount(text: string): string | null {
     if (!value) continue;
 
     const hasCurrencySignal = /[$]|usdt|usd|dollars?/i.test(value);
-    if (!hasCurrencySignal && hasAccountContextNear(text, match.index ?? 0, (match.index ?? 0) + value.length)) continue;
+    const start = match.index ?? 0;
+    const end = start + value.length;
+    if (!hasCurrencySignal && hasAccountContextNear(text, start, end) && !hasPaymentContextNear(text, start, end)) continue;
 
     return value.replace(/\s+/g, " ");
   }
@@ -342,16 +433,11 @@ export function classifyIntent(message: string, previousContext = ""): Classifie
   const accessLevel = extractAccessLevel(combined);
   const amount = ["share_ad_account", "verify_account", "check_account_status"].includes(intent) ? null : extractAmount(combined);
   const reportRange = extractReportRange(combined);
+  const actions = detectActions(combined, intent, amount);
 
   const extractedData: Record<string, unknown> = {
-    bmIds,
-    adAccountIds,
-    accountNames
+    actions
   };
-
-  if (accessLevel !== "not_specified") extractedData.accessLevel = accessLevel;
-  if (amount) extractedData.amountOrPayment = amount;
-  if (reportRange) extractedData.reportRange = reportRange;
 
   const confidence = best ? (best.score > 1 ? "high" : "medium") : "low";
   const requiresMark = intent !== "no_action";
