@@ -22,7 +22,6 @@ export function TicketsTable({ tickets }: { tickets: Ticket[] }) {
             <th className="px-4 py-3">Intent</th>
             <th className="px-4 py-3">Status</th>
             <th className="px-4 py-3">SLA</th>
-            <th className="px-4 py-3">Priority</th>
             <th className="px-4 py-3">Created</th>
             <th className="px-4 py-3">Message</th>
             <th className="px-4 py-3">Action</th>
@@ -64,7 +63,6 @@ export function TicketsTable({ tickets }: { tickets: Ticket[] }) {
                     <StatusBadge value="normal" type="neutral" label="OK" />
                   )}
                 </td>
-                <td className="px-4 py-3"><StatusBadge value={ticket.priority ?? "normal"} type="priority" /></td>
                 <td className="px-4 py-3 text-muted-foreground">{formatDate(ticket.created_at)}</td>
                 <td className="max-w-sm px-4 py-3 text-muted-foreground">
                   <span className="block truncate">{truncate(ticket.client_original_message, 130)}</span>

@@ -9,10 +9,9 @@ import { formatIntentLabel, formatValueLabel } from "@/lib/display";
 type TicketFiltersProps = {
   statuses: string[];
   intents: string[];
-  priorities: string[];
 };
 
-export function TicketFilters({ statuses, intents, priorities }: TicketFiltersProps) {
+export function TicketFilters({ statuses, intents }: TicketFiltersProps) {
   const router = useRouter();
   const searchParams = useSearchParams();
   const [isPending, startTransition] = useTransition();
@@ -34,7 +33,7 @@ export function TicketFilters({ statuses, intents, priorities }: TicketFiltersPr
   }
 
   return (
-    <div className="grid gap-3 rounded-lg border border-border bg-card p-4 md:grid-cols-[1.4fr_1fr_1fr_1fr_auto]">
+    <div className="grid gap-3 rounded-lg border border-border bg-card p-4 md:grid-cols-[1.4fr_1fr_1fr_auto]">
       <label className="relative">
         <span className="sr-only">Search tickets</span>
         <Search className="pointer-events-none absolute left-3 top-3 h-4 w-4 text-muted-foreground" aria-hidden="true" />
@@ -56,10 +55,6 @@ export function TicketFilters({ statuses, intents, priorities }: TicketFiltersPr
       <Select defaultValue={searchParams.get("intent") ?? "all"} onChange={(event) => updateParam("intent", event.target.value)} disabled={isPending} aria-label="Filter intent">
         <option value="all">All intents</option>
         {intents.map((intent) => <option key={intent} value={intent}>{formatIntentLabel(intent)}</option>)}
-      </Select>
-      <Select defaultValue={searchParams.get("priority") ?? "all"} onChange={(event) => updateParam("priority", event.target.value)} disabled={isPending} aria-label="Filter priority">
-        <option value="all">All priorities</option>
-        {priorities.map((priority) => <option key={priority} value={priority}>{formatValueLabel(priority)}</option>)}
       </Select>
       <button
         type="button"

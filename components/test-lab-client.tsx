@@ -8,14 +8,6 @@ import { getActionRecommendation } from "@/lib/operations";
 import type { ClassifiedIntent } from "@/lib/intent-classifier";
 import type { Ticket } from "@/lib/types";
 
-const examples = [
-  { label: "Deposit example", text: "Hello we sent 1500 USDT top up payment done please add funds" },
-  { label: "Share ad account example", text: "Please share ad account 1234567890 to BM 987654321 full access" },
-  { label: "Availability example", text: "Do you have GH accounts available today? Can we request 5?" },
-  { label: "Refund example", text: "Please refund remaining balance to my TRC20 wallet address" },
-  { label: "Policy example", text: "Can we run this offer domain? Is this website compliant with policy?" }
-];
-
 export function TestLabClient() {
   const [message, setMessage] = useState("");
   const [previousContext, setPreviousContext] = useState("");
@@ -103,18 +95,6 @@ export function TestLabClient() {
             placeholder="Paste a Telegram client message..."
             className="min-h-40"
           />
-          <div className="flex flex-wrap gap-2">
-            {examples.map((example) => (
-              <button
-                key={example.label}
-                type="button"
-                onClick={() => setMessage(example.text)}
-                className="rounded-full border border-border bg-card px-3 py-2 text-xs font-semibold text-muted-foreground transition hover:bg-muted hover:text-foreground"
-              >
-                {example.label}
-              </button>
-            ))}
-          </div>
           <Textarea
             value={previousContext}
             onChange={(event) => setPreviousContext(event.target.value)}
@@ -145,23 +125,12 @@ export function TestLabClient() {
               <StatusBadge value={result.confidence} type="priority" label={`Confidence: ${result.confidence}`} />
               <StatusBadge value={result.requiresMark ? "waiting_for_mark" : "closed"} label={result.requiresMark ? "Requires Mark" : "No Mark"} />
             </div>
-            <dl className="grid gap-3 text-sm md:grid-cols-2">
-              <div><dt className="font-semibold">Should reply</dt><dd className="text-muted-foreground">{result.shouldReply ? "yes" : "no"}</dd></div>
-              <div><dt className="font-semibold">Close conversation</dt><dd className="text-muted-foreground">{result.closeConversation ? "yes" : "no"}</dd></div>
-              <div><dt className="font-semibold">Access level</dt><dd className="text-muted-foreground">{result.accessLevel}</dd></div>
-              <div><dt className="font-semibold">Holding message</dt><dd className="text-muted-foreground">{result.holdingMessage || "No reply"}</dd></div>
-            </dl>
             {recommendation ? (
               <div className="rounded-md border border-border bg-muted p-3 text-sm">
-                <p className="font-semibold">Recommended Mark action</p>
-                <p className="mt-1 text-muted-foreground">{recommendation.label} | Risk: {recommendation.riskLevel}</p>
-                <p className="mt-1 text-muted-foreground">{recommendation.reason}</p>
+                <p className="font-semibold">Recommended action</p>
+                <p className="mt-1 text-muted-foreground">{recommendation.label}</p>
               </div>
             ) : null}
-            <div>
-              <p className="font-semibold">Internal summary</p>
-              <p className="mt-1 whitespace-pre-wrap text-sm text-muted-foreground">{result.internalSummary}</p>
-            </div>
             <div>
               <p className="font-semibold">Extracted data</p>
               <div className="mt-2 flex flex-wrap gap-2">
@@ -170,18 +139,6 @@ export function TestLabClient() {
                 ))}
               </div>
               <pre className="mt-1 max-h-72 overflow-auto rounded-md bg-muted p-3 text-xs">{JSON.stringify(result.extractedData, null, 2)}</pre>
-            </div>
-            <div>
-              <p className="font-semibold">Completion options</p>
-              <div className="mt-2 flex flex-wrap gap-2">
-                {result.completionOptions.map((option) => <StatusBadge key={option} value={option} type="neutral" label={option} />)}
-              </div>
-            </div>
-            <div>
-              <p className="font-semibold">Matched rules</p>
-              <ul className="mt-1 space-y-1 text-sm text-muted-foreground">
-                {result.matchedRules.map((rule) => <li key={rule}>{rule}</li>)}
-              </ul>
             </div>
           </div>
         )}

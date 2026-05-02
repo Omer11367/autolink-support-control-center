@@ -101,7 +101,7 @@ export default async function TicketDetailPage({ params }: { params: { id: strin
         </div>
       </header>
 
-      <section className="grid gap-4 xl:grid-cols-[0.95fr_1.05fr_0.9fr]">
+      <section className="grid gap-4 xl:grid-cols-[1fr_0.95fr]">
         <div className="space-y-4">
           <Card>
             <h2 className="text-lg font-bold">Client message</h2>
@@ -139,7 +139,7 @@ export default async function TicketDetailPage({ params }: { params: { id: strin
           </Card>
         </div>
 
-        <div className="space-y-4">
+        <div className="space-y-4 xl:col-span-2 xl:grid xl:grid-cols-2 xl:gap-4 xl:space-y-0">
           <Card>
             <h2 className="text-lg font-bold">Smart recommendation</h2>
             <div className="mt-3 space-y-3 text-sm">
