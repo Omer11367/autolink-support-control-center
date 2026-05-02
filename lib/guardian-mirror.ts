@@ -7,6 +7,65 @@ function joinList(values: unknown): string {
   return values.map(String).filter(Boolean).join(", ");
 }
 
+function toStringList(values: unknown): string[] {
+  if (!Array.isArray(values)) return [];
+  return values.map(String).filter(Boolean);
+}
+
+function uniqueValues(values: string[]): string[] {
+  const seen = new Set<string>();
+  const result: string[] = [];
+
+  for (const value of values) {
+    const key = value.toLowerCase();
+    if (!seen.has(key)) {
+      seen.add(key);
+      result.push(value);
+    }
+  }
+
+  return result;
+}
+
+function removeDuplicateValues(primary: string[], valuesToRemove: string[]): string[] {
+  const blocked = new Set(valuesToRemove.map((value) => value.toLowerCase()));
+  return primary.filter((value) => !blocked.has(value.toLowerCase()));
+}
+
+function splitLabeledValues(rawValue: string): string[] {
+  return rawValue
+    .split(/(?:,|\n|\s+and\s+|\s*&\s*)/i)
+    .map((value) => value.trim().replace(/^[^A-Za-z0-9]+|[^A-Za-z0-9_-]+$/g, ""))
+    .filter(Boolean);
+}
+
+function extractAfterLabels(message: string, pattern: RegExp): string[] {
+  const values: string[] = [];
+  let match: RegExpExecArray | null;
+
+  while ((match = pattern.exec(message)) !== null) {
+    values.push(...splitLabeledValues(match[1] ?? ""));
+  }
+
+  return uniqueValues(values);
+}
+
+function parseMirrorEntities(message: string) {
+  const adAccountValues = extractAfterLabels(
+    message,
+    /\b(?:ad\s+accounts?|accounts?|accs?|acc)\b\s*[:#-]?\s+(.+?)(?=\s+\b(?:to|into|for|with|bm|business\s+manager|full|partial|view|access)\b|[.!?]?$|$)/gi
+  );
+  const bmValues = extractAfterLabels(
+    message,
+    /\b(?:bm|business\s+manager)\b\s*[:#-]?\s+(.+?)(?=\s+\b(?:with|for|account|accounts|ad\s+account|acc|full|partial|view|access)\b|[.!?]?$|$)/gi
+  );
+
+  return {
+    adAccountValues: removeDuplicateValues(adAccountValues, bmValues),
+    bmValues: removeDuplicateValues(bmValues, adAccountValues)
+  };
+}
+
 export function shouldIgnoreTelegramMessage(message: string): boolean {
   return EMOJI_ONLY_PATTERN.test(message.trim());
 }
@@ -16,8 +75,11 @@ export function buildGuardianMirrorMessage(message: string, previousContext = ""
   if (!cleanMessage || shouldIgnoreTelegramMessage(cleanMessage)) return null;
 
   const classification = classifyIntent(cleanMessage, previousContext);
-  const bmIds = joinList(classification.extractedData.bmIds);
-  const adAccountIds = joinList(classification.extractedData.adAccountIds);
+  const parsedEntities = parseMirrorEntities(cleanMessage);
+  const fallbackBmValues = toStringList(classification.extractedData.bmIds);
+  const fallbackAdAccountValues = removeDuplicateValues(toStringList(classification.extractedData.adAccountIds), fallbackBmValues);
+  const bmIds = joinList(parsedEntities.bmValues) || joinList(fallbackBmValues);
+  const adAccountIds = joinList(parsedEntities.adAccountValues) || joinList(fallbackAdAccountValues);
   const accountNames = joinList(classification.extractedData.accountNames);
   const access = classification.accessLevel !== "not_specified" ? classification.accessLevel : "";
 
