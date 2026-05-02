@@ -224,7 +224,7 @@ export function classifyIntent(message: string, previousContext = ""): Classifie
 
   const confidence = best ? (best.score > 1 ? "high" : "medium") : "low";
   const requiresMark = intent !== "no_action";
-  const holdingMessage = requiresMark ? chooseHoldingMessage(combined) : "Hello! Let me check on this and I’ll get back to you shortly.";
+  const holdingMessage = requiresMark ? chooseHoldingMessage() : "";
   const humanLabel = formatIntentLabel(intent);
   const note = best?.rule.note ? ` ${best.rule.note}` : "";
   const internalSummary = [
