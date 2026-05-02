@@ -20,12 +20,10 @@ const actionTypes: MarkActionType[] = [
 type TicketActionsProps = {
   ticketId: string;
   clientUsername?: string | null;
-  clientChatId?: string | number | null;
-  telegramConfigured: boolean;
   recommendation: ActionRecommendation;
 };
 
-export function TicketActions({ ticketId, clientUsername, clientChatId, telegramConfigured, recommendation }: TicketActionsProps) {
+export function TicketActions({ ticketId, clientUsername, recommendation }: TicketActionsProps) {
   const router = useRouter();
   const [customReply, setCustomReply] = useState("");
   const initialAction = recommendation.action === "reclassify_first" ? "handled" : recommendation.action;
@@ -67,8 +65,6 @@ export function TicketActions({ ticketId, clientUsername, clientChatId, telegram
   const previewMessage = selectedAction === "close"
     ? "Close will update the ticket to closed and will not send Telegram."
     : resolveCompletionMessage(selectedAction, clientUsername, customReply) || "Write a custom reply to preview the message.";
-  const willCallTelegram = selectedAction !== "close" && Boolean(telegramConfigured && clientChatId && previewMessage.trim());
-  const willInsertBotResponse = selectedAction !== "close" && willCallTelegram;
 
   return (
     <div className="space-y-4">
@@ -104,12 +100,6 @@ export function TicketActions({ ticketId, clientUsername, clientChatId, telegram
         <p className="text-xs font-semibold uppercase text-muted-foreground">Message preview</p>
         <p className="mt-2 whitespace-pre-wrap text-sm">{previewMessage}</p>
         {selectedAction !== "close" ? <div className="mt-3"><CopyButton value={previewMessage} label="Copy reply" /></div> : null}
-        <dl className="mt-3 grid gap-2 text-xs text-muted-foreground sm:grid-cols-2">
-          <div><dt className="font-semibold">Telegram call</dt><dd>{willCallTelegram ? "yes" : "no"}</dd></div>
-          <div><dt className="font-semibold">Insert bot_responses</dt><dd>{willInsertBotResponse ? "yes, after Telegram result" : "no"}</dd></div>
-          <div><dt className="font-semibold">Selected action</dt><dd>{actionLabel(selectedAction)}</dd></div>
-          <div><dt className="font-semibold">Client chat id</dt><dd>{clientChatId ?? "missing"}</dd></div>
-        </dl>
       </div>
 
       <Button onClick={runSelectedAction} disabled={isPending || (selectedAction === "custom_reply" && !customReply.trim())}>

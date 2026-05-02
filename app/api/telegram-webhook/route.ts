@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { createClient } from "@supabase/supabase-js";
-import { buildGuardianMirrorMessage, shouldIgnoreTelegramMessage } from "@/lib/guardian-mirror";
+import { buildGuardianMirrorMessage } from "@/lib/guardian-mirror";
 import { classifyIntent } from "@/lib/intent-classifier";
 
 type TelegramChat = {
@@ -127,16 +127,12 @@ export async function POST(request: Request) {
 
     const text = (message.text ?? message.caption ?? "").trim();
 
-    if (!text || shouldIgnoreTelegramMessage(text)) {
-      return NextResponse.json({ ok: true, ignored: "empty_or_reaction" });
+    if (!text) {
+      return NextResponse.json({ ok: true, ignored: "empty_message" });
     }
 
     const classification = classifyIntent(text);
     const guardianMessage = buildGuardianMirrorMessage(text) ?? text;
-
-    const holdingMessage = classification.holdingMessage || HOLDING_MESSAGE;
-    const holdingMessageId = await sendTelegramMessage(botToken, chatId, holdingMessage);
-    const guardianMessageId = await sendTelegramMessage(botToken, markGroupChatId, guardianMessage);
 
     const { data: storedMessage, error: messageError } = await supabase
       .from("messages")
@@ -156,6 +152,7 @@ export async function POST(request: Request) {
       console.error("supabase-insert-error", { table: "messages", message: messageError.message });
       throw new Error(`Supabase messages insert failed: ${messageError.message}`);
     }
+    console.log("telegram-message-saved", { chatId, messageId: message.message_id, rowId: storedMessage?.id });
 
     const { data: ticket, error: ticketError } = await supabase
       .from("tickets")
@@ -166,14 +163,12 @@ export async function POST(request: Request) {
         client_user_id: message.from?.id ?? null,
         client_username: message.from?.username ?? null,
         intent: classification.intent,
-        status: classification.requiresMark ? "waiting_mark" : "new",
+        status: classification.requiresMark ? "waiting_mark" : "closed",
         priority: ["deposit_funds", "refund_request", "payment_issue", "check_policy"].includes(classification.intent) ? "high" : "normal",
         needs_mark: classification.requiresMark,
         client_original_message: text,
         extracted_data: classification.extractedData,
-        internal_summary: classification.internalSummary,
-        holding_message_id: holdingMessageId ?? null,
-        internal_message_id: guardianMessageId ?? null
+        internal_summary: classification.internalSummary
       })
       .select("id")
       .single();
@@ -181,6 +176,28 @@ export async function POST(request: Request) {
     if (ticketError) {
       console.error("supabase-insert-error", { table: "tickets", message: ticketError.message });
       throw new Error(`Supabase tickets insert failed: ${ticketError.message}`);
+    }
+    console.log("telegram-ticket-created", { chatId, messageId: message.message_id, ticketId: ticket?.id });
+
+    if (!classification.requiresMark || !classification.shouldReply) {
+      return NextResponse.json({ ok: true, saved: true, ignored: "no_action", ticketId: ticket?.id ?? null });
+    }
+
+    const holdingMessage = classification.holdingMessage || HOLDING_MESSAGE;
+    const holdingMessageId = await sendTelegramMessage(botToken, chatId, holdingMessage);
+    const guardianMessageId = await sendTelegramMessage(botToken, markGroupChatId, guardianMessage);
+
+    const { error: ticketMessageIdsError } = await supabase
+      .from("tickets")
+      .update({
+        holding_message_id: holdingMessageId ?? null,
+        internal_message_id: guardianMessageId ?? null
+      })
+      .eq("id", ticket?.id);
+
+    if (ticketMessageIdsError) {
+      console.error("supabase-update-error", { table: "tickets", message: ticketMessageIdsError.message });
+      throw new Error(`Supabase tickets update failed: ${ticketMessageIdsError.message}`);
     }
 
     const { error: botResponsesError } = await supabase.from("bot_responses").insert([
