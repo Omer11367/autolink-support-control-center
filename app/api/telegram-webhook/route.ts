@@ -39,9 +39,17 @@ type TelegramSendResponse = {
 
 const HOLDING_MESSAGE = "Hello! I'll check this now and update you shortly.";
 
-function env(name: string): string {
-  const value = process.env[name];
-  if (!value) throw new Error(`Missing environment variable: ${name}`);
+function firstEnv(names: string[]): string | undefined {
+  for (const name of names) {
+    const value = process.env[name]?.trim();
+    if (value) return value;
+  }
+  return undefined;
+}
+
+function requireEnv(label: string, names: string[]): string {
+  const value = firstEnv(names);
+  if (!value) throw new Error(`Missing environment variable: ${label}`);
   return value;
 }
 
@@ -59,6 +67,7 @@ async function sendTelegramMessage(token: string, chatId: number | string, text:
   const payload = (await response.json()) as TelegramSendResponse;
 
   if (!response.ok || !payload.ok) {
+    console.error("telegram-send-error", payload.description ?? response.statusText);
     throw new Error(payload.description ?? "Telegram send failed.");
   }
 
@@ -71,12 +80,30 @@ function createTicketCode(): string {
   return `AL-${stamp}-${suffix}`;
 }
 
+function getRuntimeEnv() {
+  return {
+    botToken: requireEnv("TELEGRAM_BOT_TOKEN", ["TELEGRAM_BOT_TOKEN"]),
+    markGroupChatId: requireEnv("MARK_GROUP_CHAT_ID or MARK_INTERNAL_CHAT_ID", ["MARK_GROUP_CHAT_ID", "MARK_INTERNAL_CHAT_ID"]),
+    supabaseUrl: requireEnv("NEXT_PUBLIC_SUPABASE_URL or SUPABASE_URL", ["NEXT_PUBLIC_SUPABASE_URL", "SUPABASE_URL"]),
+    serviceRoleKey: requireEnv("SERVICE_ROLE_KEY or SUPABASE_SERVICE_ROLE_KEY", ["SERVICE_ROLE_KEY", "SUPABASE_SERVICE_ROLE_KEY"])
+  };
+}
+
+export async function GET() {
+  return NextResponse.json({
+    ok: true,
+    env: {
+      telegramBotToken: Boolean(firstEnv(["TELEGRAM_BOT_TOKEN"])),
+      markGroupChatId: Boolean(firstEnv(["MARK_GROUP_CHAT_ID", "MARK_INTERNAL_CHAT_ID"])),
+      supabaseUrl: Boolean(firstEnv(["NEXT_PUBLIC_SUPABASE_URL", "SUPABASE_URL"])),
+      serviceRoleKey: Boolean(firstEnv(["SERVICE_ROLE_KEY", "SUPABASE_SERVICE_ROLE_KEY"]))
+    }
+  });
+}
+
 export async function POST(request: Request) {
   try {
-    const botToken = env("TELEGRAM_BOT_TOKEN");
-    const guardianChatId = env("MARK_GROUP_CHAT_ID");
-    const supabaseUrl = env("NEXT_PUBLIC_SUPABASE_URL");
-    const serviceRoleKey = env("SERVICE_ROLE_KEY");
+    const { botToken, markGroupChatId, supabaseUrl, serviceRoleKey } = getRuntimeEnv();
 
     const supabase = createClient(supabaseUrl, serviceRoleKey, {
       auth: {
@@ -94,7 +121,7 @@ export async function POST(request: Request) {
 
     const chatId = message.chat.id;
 
-    if (String(chatId) === String(guardianChatId)) {
+    if (String(chatId) === String(markGroupChatId)) {
       return NextResponse.json({ ok: true, ignored: "guardian_group" });
     }
 
@@ -106,6 +133,9 @@ export async function POST(request: Request) {
 
     const classification = classifyIntent(text);
     const guardianMessage = buildGuardianMirrorMessage(text) ?? text;
+
+    const holdingMessageId = await sendTelegramMessage(botToken, chatId, HOLDING_MESSAGE);
+    const guardianMessageId = await sendTelegramMessage(botToken, markGroupChatId, guardianMessage);
 
     const { data: storedMessage, error: messageError } = await supabase
       .from("messages")
@@ -121,10 +151,10 @@ export async function POST(request: Request) {
       .select("id")
       .single();
 
-    if (messageError) throw new Error(messageError.message);
-
-    const holdingMessageId = await sendTelegramMessage(botToken, chatId, HOLDING_MESSAGE);
-    const guardianMessageId = await sendTelegramMessage(botToken, guardianChatId, guardianMessage);
+    if (messageError) {
+      console.error("supabase-insert-error", { table: "messages", message: messageError.message });
+      throw new Error(`Supabase messages insert failed: ${messageError.message}`);
+    }
 
     const { data: ticket, error: ticketError } = await supabase
       .from("tickets")
@@ -147,9 +177,12 @@ export async function POST(request: Request) {
       .select("id")
       .single();
 
-    if (ticketError) throw new Error(ticketError.message);
+    if (ticketError) {
+      console.error("supabase-insert-error", { table: "tickets", message: ticketError.message });
+      throw new Error(`Supabase tickets insert failed: ${ticketError.message}`);
+    }
 
-    await supabase.from("bot_responses").insert([
+    const { error: botResponsesError } = await supabase.from("bot_responses").insert([
       {
         ticket_id: ticket?.id ?? null,
         telegram_chat_id: chatId,
@@ -159,15 +192,21 @@ export async function POST(request: Request) {
       },
       {
         ticket_id: ticket?.id ?? null,
-        telegram_chat_id: Number(guardianChatId),
+        telegram_chat_id: Number(markGroupChatId),
         telegram_message_id: guardianMessageId ?? null,
         response_type: "guardian_mirror",
         response_text: guardianMessage
       }
     ]);
 
+    if (botResponsesError) {
+      console.error("supabase-insert-error", { table: "bot_responses", message: botResponsesError.message });
+      throw new Error(`Supabase bot_responses insert failed: ${botResponsesError.message}`);
+    }
+
     return NextResponse.json({ ok: true });
   } catch (error) {
+    console.error("telegram-webhook-error", error);
     return NextResponse.json(
       {
         ok: false,
