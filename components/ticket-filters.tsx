@@ -7,11 +7,14 @@ import { Input, Select } from "@/components/ui";
 import { formatIntentLabel, formatValueLabel } from "@/lib/display";
 
 type TicketFiltersProps = {
-  statuses: string[];
-  intents: string[];
+  statuses?: string[];
+  intents?: string[];
+  clients?: Array<{ value: string; label: string }>;
+  basePath?: string;
+  showTicketFilters?: boolean;
 };
 
-export function TicketFilters({ statuses, intents }: TicketFiltersProps) {
+export function TicketFilters({ statuses = [], intents = [], clients = [], basePath = "/tickets", showTicketFilters = true }: TicketFiltersProps) {
   const router = useRouter();
   const searchParams = useSearchParams();
   const [isPending, startTransition] = useTransition();
@@ -22,40 +25,61 @@ export function TicketFilters({ statuses, intents }: TicketFiltersProps) {
     else next.set(key, value);
 
     startTransition(() => {
-      router.push(`/tickets?${next.toString()}`);
+      router.push(`${basePath}?${next.toString()}`);
     });
   }
 
   function resetFilters() {
     startTransition(() => {
-      router.push("/tickets");
+      router.push(basePath);
     });
   }
 
   return (
-    <div className="grid gap-3 rounded-lg border border-border bg-card p-4 md:grid-cols-[1.4fr_1fr_1fr_auto]">
-      <label className="relative">
-        <span className="sr-only">Search tickets</span>
-        <Search className="pointer-events-none absolute left-3 top-3 h-4 w-4 text-muted-foreground" aria-hidden="true" />
-        <Input
-          className="pl-9"
-          defaultValue={searchParams.get("search") ?? ""}
-          placeholder="Search ticket, username, message, intent..."
-          onKeyDown={(event) => {
-            if (event.key === "Enter") updateParam("search", event.currentTarget.value);
-          }}
-          onBlur={(event) => updateParam("search", event.currentTarget.value)}
-          disabled={isPending}
-        />
-      </label>
-      <Select defaultValue={searchParams.get("status") ?? "all"} onChange={(event) => updateParam("status", event.target.value)} disabled={isPending} aria-label="Filter status">
-        <option value="all">All statuses</option>
-        {statuses.map((status) => <option key={status} value={status}>{formatValueLabel(status)}</option>)}
+    <div className="grid gap-3 rounded-lg border border-border bg-card p-4 md:grid-cols-4">
+      {showTicketFilters ? (
+        <>
+          <label className="relative">
+            <span className="sr-only">Search tickets</span>
+            <Search className="pointer-events-none absolute left-3 top-3 h-4 w-4 text-muted-foreground" aria-hidden="true" />
+            <Input
+              className="pl-9"
+              defaultValue={searchParams.get("search") ?? ""}
+              placeholder="Search ticket, username, message, intent..."
+              onKeyDown={(event) => {
+                if (event.key === "Enter") updateParam("search", event.currentTarget.value);
+              }}
+              onBlur={(event) => updateParam("search", event.currentTarget.value)}
+              disabled={isPending}
+            />
+          </label>
+          <Select defaultValue={searchParams.get("status") ?? "all"} onChange={(event) => updateParam("status", event.target.value)} disabled={isPending} aria-label="Filter status">
+            <option value="all">All statuses</option>
+            {statuses.map((status) => <option key={status} value={status}>{formatValueLabel(status)}</option>)}
+          </Select>
+          <Select defaultValue={searchParams.get("intent") ?? "all"} onChange={(event) => updateParam("intent", event.target.value)} disabled={isPending} aria-label="Filter intent">
+            <option value="all">All intents</option>
+            {intents.map((intent) => <option key={intent} value={intent}>{formatIntentLabel(intent)}</option>)}
+          </Select>
+        </>
+      ) : null}
+      <Select defaultValue={searchParams.get("client") ?? "all"} onChange={(event) => updateParam("client", event.target.value)} disabled={isPending} aria-label="Filter client">
+        <option value="all">All clients</option>
+        {clients.map((client) => <option key={client.value} value={client.value}>{client.label}</option>)}
       </Select>
-      <Select defaultValue={searchParams.get("intent") ?? "all"} onChange={(event) => updateParam("intent", event.target.value)} disabled={isPending} aria-label="Filter intent">
-        <option value="all">All intents</option>
-        {intents.map((intent) => <option key={intent} value={intent}>{formatIntentLabel(intent)}</option>)}
+      <Select defaultValue={searchParams.get("date") ?? "lifetime"} onChange={(event) => updateParam("date", event.target.value)} disabled={isPending} aria-label="Filter date">
+        <option value="today">Today</option>
+        <option value="7d">Last 7 days</option>
+        <option value="month">This month</option>
+        <option value="lifetime">Lifetime</option>
+        <option value="custom">Custom date range</option>
       </Select>
+      {searchParams.get("date") === "custom" ? (
+        <>
+          <Input type="date" defaultValue={searchParams.get("start") ?? ""} onChange={(event) => updateParam("start", event.target.value)} disabled={isPending} aria-label="Start date" />
+          <Input type="date" defaultValue={searchParams.get("end") ?? ""} onChange={(event) => updateParam("end", event.target.value)} disabled={isPending} aria-label="End date" />
+        </>
+      ) : null}
       <button
         type="button"
         onClick={resetFilters}

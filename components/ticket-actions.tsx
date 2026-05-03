@@ -21,9 +21,10 @@ type TicketActionsProps = {
   ticketId: string;
   clientUsername?: string | null;
   recommendation: ActionRecommendation;
+  replyTemplates?: string[];
 };
 
-export function TicketActions({ ticketId, clientUsername, recommendation }: TicketActionsProps) {
+export function TicketActions({ ticketId, clientUsername, recommendation, replyTemplates = [] }: TicketActionsProps) {
   const router = useRouter();
   const [customReply, setCustomReply] = useState("");
   const initialAction = recommendation.action === "reclassify_first" ? "handled" : recommendation.action;
@@ -34,6 +35,13 @@ export function TicketActions({ ticketId, clientUsername, recommendation }: Tick
 
   function selectAction(actionType: MarkActionType) {
     setSelectedAction(actionType);
+    setMessage(null);
+    setError(null);
+  }
+
+  function selectTemplate(template: string) {
+    setCustomReply(template);
+    setSelectedAction("custom_reply");
     setMessage(null);
     setError(null);
   }
@@ -83,6 +91,21 @@ export function TicketActions({ ticketId, clientUsername, recommendation }: Tick
 
       <div className="space-y-2">
         <label className="text-sm font-semibold" htmlFor="custom-reply">Custom reply</label>
+        {replyTemplates.length > 0 ? (
+          <div className="grid gap-2 sm:grid-cols-2">
+            {replyTemplates.map((template) => (
+              <button
+                key={template}
+                type="button"
+                onClick={() => selectTemplate(template)}
+                disabled={isPending}
+                className="rounded-md border border-border bg-zinc-900 px-3 py-2 text-left text-sm text-zinc-100 transition hover:bg-zinc-800 disabled:pointer-events-none disabled:opacity-50"
+              >
+                {template}
+              </button>
+            ))}
+          </div>
+        ) : null}
         <Textarea
           id="custom-reply"
           value={customReply}

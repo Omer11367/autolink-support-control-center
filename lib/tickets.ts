@@ -9,7 +9,56 @@ export type TicketFilters = {
   intent?: string;
   priority?: string;
   search?: string;
+  client?: string;
+  date?: string;
+  start?: string;
+  end?: string;
 };
+
+export type ClientOption = {
+  value: string;
+  label: string;
+};
+
+function getDateBounds(filters: TicketFilters): { start?: string; end?: string } {
+  const now = new Date();
+  const selected = filters.date ?? "lifetime";
+
+  if (selected === "today") {
+    const start = new Date(now);
+    start.setHours(0, 0, 0, 0);
+    return { start: start.toISOString() };
+  }
+
+  if (selected === "7d") {
+    return { start: new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000).toISOString() };
+  }
+
+  if (selected === "month") {
+    return { start: new Date(now.getFullYear(), now.getMonth(), 1).toISOString() };
+  }
+
+  if (selected === "custom") {
+    const start = filters.start ? new Date(`${filters.start}T00:00:00`) : null;
+    const end = filters.end ? new Date(`${filters.end}T23:59:59.999`) : null;
+    return {
+      start: start && !Number.isNaN(start.getTime()) ? start.toISOString() : undefined,
+      end: end && !Number.isNaN(end.getTime()) ? end.toISOString() : undefined
+    };
+  }
+
+  return {};
+}
+
+function readChatTitle(rawPayload: unknown): string | null {
+  if (!rawPayload || typeof rawPayload !== "object" || Array.isArray(rawPayload)) return null;
+  const message = (rawPayload as { message?: unknown }).message;
+  if (!message || typeof message !== "object" || Array.isArray(message)) return null;
+  const chat = (message as { chat?: unknown }).chat;
+  if (!chat || typeof chat !== "object" || Array.isArray(chat)) return null;
+  const title = (chat as { title?: unknown }).title;
+  return typeof title === "string" && title.trim() ? title : null;
+}
 
 function emptyDashboard(): DashboardStats {
   return {
@@ -31,64 +80,29 @@ function emptyDashboard(): DashboardStats {
   };
 }
 
-export async function getDashboardStats(): Promise<DashboardStats> {
+export async function getDashboardStats(filters: TicketFilters = {}): Promise<DashboardStats> {
   noStore();
   if (!hasSupabaseServerEnv()) return emptyDashboard();
 
   const supabase = createSupabaseAdminClient();
-  const since24Hours = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
-  const [total, waiting, resolved, closed, recent, intentRows] = await Promise.all([
-    supabase.from("tickets").select("id", { count: "exact", head: true }),
-    supabase.from("tickets").select("id", { count: "exact", head: true }).or("needs_mark.eq.true,status.eq.waiting_for_mark"),
-    supabase.from("tickets").select("id", { count: "exact", head: true }).eq("status", "resolved"),
-    supabase.from("tickets").select("id", { count: "exact", head: true }).eq("status", "closed"),
-    supabase.from("tickets").select("*").order("created_at", { ascending: false }).limit(8),
-    supabase.from("tickets").select("intent").not("intent", "is", null).limit(500)
-  ]);
+  const bounds = getDateBounds(filters);
+  let ticketsQuery = supabase.from("tickets").select("*").order("created_at", { ascending: false }).limit(1000);
+  if (filters.client && filters.client !== "all") ticketsQuery = ticketsQuery.eq("client_chat_id", filters.client);
+  if (bounds.start) ticketsQuery = ticketsQuery.gte("created_at", bounds.start);
+  if (bounds.end) ticketsQuery = ticketsQuery.lte("created_at", bounds.end);
 
-  const [newTickets, highPriorityTickets, telegramErrors, last24Hours] = await Promise.all([
-    supabase.from("tickets").select("id", { count: "exact", head: true }).in("status", ["new", "open"]),
-    supabase.from("tickets").select("id", { count: "exact", head: true }).in("priority", ["high", "urgent"]),
-    supabase.from("bot_responses").select("id", { count: "exact", head: true }).in("response_type", ["error", "failed", "telegram_error"]),
-    supabase.from("tickets").select("id", { count: "exact", head: true }).gte("created_at", since24Hours)
-  ]);
-  const { data: operationalRows, error: operationalError } = await supabase
-    .from("tickets")
-    .select("*")
-    .order("created_at", { ascending: false })
-    .limit(250);
+  const { data: operationalRows, error: operationalError } = await ticketsQuery;
+  const telegramErrors = await supabase.from("bot_responses").select("id", { count: "exact", head: true }).in("response_type", ["error", "failed", "telegram_error"]);
 
-  if (
-    total.error ||
-    waiting.error ||
-    resolved.error ||
-    closed.error ||
-    recent.error ||
-    intentRows.error ||
-    newTickets.error ||
-    highPriorityTickets.error ||
-    telegramErrors.error ||
-    last24Hours.error ||
-    operationalError
-  ) {
-    throw new Error(
-      total.error?.message ??
-        waiting.error?.message ??
-        resolved.error?.message ??
-        closed.error?.message ??
-        recent.error?.message ??
-        intentRows.error?.message ??
-        newTickets.error?.message ??
-        highPriorityTickets.error?.message ??
-        telegramErrors.error?.message ??
-        last24Hours.error?.message ??
-        operationalError?.message
-    );
+  if (operationalError || telegramErrors.error) {
+    throw new Error(operationalError?.message ?? telegramErrors.error?.message);
   }
 
+  const operationalTickets = (operationalRows ?? []) as Ticket[];
+
   const counts = new Map<string, number>();
-  for (const row of intentRows.data ?? []) {
-    const intent = String(row.intent ?? "unknown");
+  for (const ticket of operationalTickets) {
+    const intent = String(ticket.intent ?? "unknown");
     counts.set(intent, (counts.get(intent) ?? 0) + 1);
   }
 
@@ -97,7 +111,6 @@ export async function getDashboardStats(): Promise<DashboardStats> {
     .sort((a, b) => b.count - a.count)
     .slice(0, 6);
 
-  const operationalTickets = (operationalRows ?? []) as Ticket[];
   const attentionTickets = operationalTickets
     .filter((ticket) => getEscalationState(ticket) !== "none")
     .sort((a, b) => {
@@ -109,19 +122,19 @@ export async function getDashboardStats(): Promise<DashboardStats> {
     .slice(0, 8);
 
   return {
-    totalTickets: total.count ?? 0,
-    waitingForMark: waiting.count ?? 0,
-    resolved: resolved.count ?? 0,
-    closed: closed.count ?? 0,
-    newTickets: newTickets.count ?? 0,
-    highPriorityTickets: highPriorityTickets.count ?? 0,
+    totalTickets: operationalTickets.length,
+    waitingForMark: operationalTickets.filter((ticket) => ticket.needs_mark || ["waiting_mark", "waiting_for_mark"].includes(ticket.status ?? "")).length,
+    resolved: operationalTickets.filter((ticket) => ticket.status === "resolved").length,
+    closed: operationalTickets.filter((ticket) => ticket.status === "closed").length,
+    newTickets: operationalTickets.filter((ticket) => ["new", "open"].includes(ticket.status ?? "")).length,
+    highPriorityTickets: operationalTickets.filter((ticket) => ["high", "urgent"].includes(ticket.priority ?? "")).length,
     telegramSendErrors: telegramErrors.count ?? 0,
-    last24HoursTickets: last24Hours.count ?? 0,
+    last24HoursTickets: operationalTickets.filter((ticket) => new Date(ticket.created_at ?? 0).getTime() >= Date.now() - 24 * 60 * 60 * 1000).length,
     waitingOver10Minutes: operationalTickets.filter((ticket) => getEscalationState(ticket) === "needs_attention").length,
     waitingOver30Minutes: operationalTickets.filter((ticket) => getEscalationState(ticket) === "urgent").length,
     paymentTickets: operationalTickets.filter((ticket) => ["deposit_funds", "payment_issue", "refund_request"].includes(ticket.intent ?? "")).length,
     unknownIntentTickets: operationalTickets.filter((ticket) => !ticket.intent || ["unknown", "other"].includes(ticket.intent)).length,
-    recentTickets: (recent.data ?? []) as Ticket[],
+    recentTickets: operationalTickets.slice(0, 8),
     attentionTickets,
     topIntents
   };
@@ -132,7 +145,12 @@ export async function getTickets(filters: TicketFilters): Promise<Ticket[]> {
   if (!hasSupabaseServerEnv()) return [] as Ticket[];
 
   const supabase = createSupabaseAdminClient();
-  let query = supabase.from("tickets").select("*").order("created_at", { ascending: false }).limit(100);
+  const bounds = getDateBounds(filters);
+  let query = supabase.from("tickets").select("*").order("created_at", { ascending: false }).limit(250);
+
+  if (filters.client && filters.client !== "all") query = query.eq("client_chat_id", filters.client);
+  if (bounds.start) query = query.gte("created_at", bounds.start);
+  if (bounds.end) query = query.lte("created_at", bounds.end);
 
   if (filters.status && filters.status !== "all") query = query.eq("status", filters.status);
   if (filters.intent && filters.intent !== "all") query = query.eq("intent", filters.intent);
@@ -148,6 +166,32 @@ export async function getTickets(filters: TicketFilters): Promise<Ticket[]> {
   const { data, error } = await query;
   if (error) throw new Error(error.message);
   return (data ?? []) as Ticket[];
+}
+
+export async function getClientOptions(): Promise<ClientOption[]> {
+  noStore();
+  if (!hasSupabaseServerEnv()) return [];
+
+  const supabase = createSupabaseAdminClient();
+  const { data, error } = await supabase
+    .from("messages")
+    .select("telegram_chat_id, raw_payload")
+    .not("telegram_chat_id", "is", null)
+    .order("created_at", { ascending: false })
+    .limit(1000);
+
+  if (error) throw new Error(error.message);
+
+  const options = new Map<string, string>();
+  for (const row of data ?? []) {
+    const value = String(row.telegram_chat_id);
+    if (!value || options.has(value)) continue;
+    options.set(value, readChatTitle(row.raw_payload) ?? value);
+  }
+
+  return Array.from(options.entries())
+    .map(([value, label]) => ({ value, label }))
+    .sort((a, b) => a.label.localeCompare(b.label));
 }
 
 export async function getTicketDetail(id: string) {

@@ -2,7 +2,7 @@ import { EmptyState } from "@/components/empty-state";
 import { TicketFilters } from "@/components/ticket-filters";
 import { TicketsTable } from "@/components/tickets-table";
 import { Card } from "@/components/ui";
-import { getTickets } from "@/lib/tickets";
+import { getClientOptions, getTickets } from "@/lib/tickets";
 
 export const dynamic = "force-dynamic";
 
@@ -12,6 +12,10 @@ type TicketsPageProps = {
     intent?: string;
     priority?: string;
     search?: string;
+    client?: string;
+    date?: string;
+    start?: string;
+    end?: string;
   };
 };
 
@@ -22,7 +26,10 @@ function uniqueStrings(values: Array<string | null | undefined>): string[] {
 }
 
 export default async function TicketsPage({ searchParams }: TicketsPageProps) {
-  const tickets = await getTickets(searchParams);
+  const [tickets, clients] = await Promise.all([
+    getTickets(searchParams),
+    getClientOptions()
+  ]);
   const statuses = uniqueStrings(tickets.map((t) => t.status));
   const intents = uniqueStrings(tickets.map((t) => t.intent));
 
@@ -33,7 +40,7 @@ export default async function TicketsPage({ searchParams }: TicketsPageProps) {
         <p className="mt-1 text-sm text-muted-foreground">Filter client requests, prioritize Mark actions, and open the full handling timeline.</p>
       </header>
 
-      <TicketFilters statuses={statuses} intents={intents} />
+      <TicketFilters statuses={statuses} intents={intents} clients={clients} />
 
       <Card className="p-0">
         {tickets.length === 0 ? (

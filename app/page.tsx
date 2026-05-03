@@ -3,16 +3,29 @@ import { AlertTriangle, Clock3, Inbox, Sparkles } from "lucide-react";
 import { EmptyState } from "@/components/empty-state";
 import { MetricCard } from "@/components/metric-card";
 import { StatusBadge } from "@/components/status-badge";
+import { TicketFilters } from "@/components/ticket-filters";
 import { Card } from "@/components/ui";
 import { formatIntentLabel } from "@/lib/display";
 import { getEscalationState } from "@/lib/operations";
-import { getDashboardStats } from "@/lib/tickets";
+import { getClientOptions, getDashboardStats } from "@/lib/tickets";
 import { truncate } from "@/lib/utils";
 
 export const dynamic = "force-dynamic";
 
-export default async function DashboardPage() {
-  const stats = await getDashboardStats();
+type DashboardPageProps = {
+  searchParams: {
+    client?: string;
+    date?: string;
+    start?: string;
+    end?: string;
+  };
+};
+
+export default async function DashboardPage({ searchParams }: DashboardPageProps) {
+  const [stats, clients] = await Promise.all([
+    getDashboardStats(searchParams),
+    getClientOptions()
+  ]);
 
   return (
     <div className="space-y-5">
@@ -26,6 +39,8 @@ export default async function DashboardPage() {
         <MetricCard label="Waiting" value={stats.waitingForMark} icon={Clock3} />
         <MetricCard label="Urgent" value={stats.waitingOver30Minutes} icon={AlertTriangle} />
       </section>
+
+      <TicketFilters clients={clients} basePath="/" showTicketFilters={false} />
 
       <Card className="p-0">
         <div className="border-b border-border p-4">
