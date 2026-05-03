@@ -5,7 +5,6 @@ import { CopyButton } from "@/components/copy-button";
 import { StatusBadge } from "@/components/status-badge";
 import { TicketActions } from "@/components/ticket-actions";
 import { Card } from "@/components/ui";
-import { getReplyTemplates } from "@/lib/action-templates";
 import { formatIntentLabel } from "@/lib/display";
 import { getActionRecommendation, getEscalationState } from "@/lib/operations";
 import { getTicketDetail } from "@/lib/tickets";
@@ -183,7 +182,6 @@ export default async function TicketDetailPage({ params }: { params: { id: strin
   if (!ticket) notFound();
 
   const recommendation = getActionRecommendation(ticket);
-  const replyTemplates = getReplyTemplates(ticket.intent, ticket.extracted_data);
   const escalationState = getEscalationState(ticket);
   const clientDisplayName = getClientDisplayName(ticket.client_username, ticket.client_chat_id, messages);
   const isShareTicket = ticket.intent === "share_ad_account" || ticket.intent === "share_account";
@@ -308,7 +306,6 @@ export default async function TicketDetailPage({ params }: { params: { id: strin
               ticketId={ticket.id}
               clientUsername={ticket.client_username}
               recommendation={recommendation}
-              replyTemplates={replyTemplates}
             />
           </div>
         </Card>

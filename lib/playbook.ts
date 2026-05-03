@@ -247,13 +247,13 @@ export const PLAYBOOK_SEED: PlaybookSeedEntry[] = [
 
 export const ACTION_COMPLETION_MESSAGES = {
   done: "This is done. Kindly check on your end. Thank you!",
-  already_shared: "Hi @client, this is already shared. Kindly check on your end. Thank you.",
+  already_shared: "Hello @client, this is already shared. Kindly check on your end. Thank you!",
   only_view_access:
-    "Upon checking, the BM has already been granted view-access to these accounts. Since these accounts were already offboarded, only view-access can be granted. Thank you for your understanding 🙏",
+    "Upon checking, the BM has been granted view access only. Please confirm if full access is needed.",
   funds_arrived: "Hello @client! Funds have been successfully added to your dashboard wallet. 😊",
   not_available:
-    "At the moment we don’t have this available. However, we will update you once it becomes available. Thank you for your understanding 🙏",
-  handled: "Hello @client, this has been checked and handled on our end. Thank you for your patience."
+    "At the moment we don’t have this available. However, we will update you once it becomes available. Thank you 🙏",
+  handled: "This has been handled. Please check on your end."
 } as const;
 
 export type MarkActionType = keyof typeof ACTION_COMPLETION_MESSAGES | "close" | "custom_reply";
