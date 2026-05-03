@@ -35,7 +35,7 @@ const ACTION_BUTTONS_BY_INTENT: Record<string, ActionButtonConfig[]> = {
   deposit: [
     { id: "deposit-funds-arrived", label: "Funds Arrived", actionType: "funds_arrived", message: "Hello @{{username}}, we received your funds. Please check your balance." },
     { id: "deposit-payment-confirmed", label: "Payment Confirmed", actionType: "done", message: "Hello @{{username}}, your payment has been confirmed on our side. Thank you!" },
-    { id: "deposit-checking-payment", label: "Checking Payment", actionType: "handled", message: "Hello @{{username}}, we are currently checking your payment." },
+    { id: "deposit-checking-payment", label: "Funds Received", actionType: "handled", message: "Hello @{{username}}, funds added to your dashboard wallet." },
     { id: "deposit-request-proof", label: "Request Proof", actionType: "handled", message: "Hello @{{username}}, please send the payment proof so we can verify it." },
     { id: "deposit-amount-mismatch", label: "Amount Mismatch", actionType: "handled", message: "Hello @{{username}}, the amount received does not match. Please confirm the amount sent." },
     { id: "deposit-pending-confirmation", label: "Pending Confirmation", actionType: "handled", message: "Hello @{{username}}, the payment is still pending confirmation." }
