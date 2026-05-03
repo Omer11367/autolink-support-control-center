@@ -22,6 +22,13 @@ type TelegramMessage = {
   from?: TelegramUser;
   text?: string;
   caption?: string;
+  photo?: Array<{
+    file_id: string;
+    file_unique_id?: string;
+    width?: number;
+    height?: number;
+    file_size?: number;
+  }>;
 };
 
 type TelegramUpdate = {
@@ -72,6 +79,67 @@ async function sendTelegramMessage(token: string, chatId: number | string, text:
   }
 
   return payload.result?.message_id;
+}
+
+async function copyTelegramMessage(
+  token: string,
+  chatId: number | string,
+  fromChatId: number | string,
+  messageId: number,
+  caption: string
+) {
+  const response = await fetch(`https://api.telegram.org/bot${token}/copyMessage`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      chat_id: chatId,
+      from_chat_id: fromChatId,
+      message_id: messageId,
+      caption
+    })
+  });
+
+  const payload = (await response.json()) as TelegramSendResponse;
+
+  if (!response.ok || !payload.ok) {
+    console.error("telegram-copy-message-error", payload.description ?? response.statusText);
+    throw new Error(payload.description ?? "Telegram copyMessage failed.");
+  }
+
+  return payload.result?.message_id;
+}
+
+async function sendTelegramPhoto(token: string, chatId: number | string, photoFileId: string, caption: string) {
+  const response = await fetch(`https://api.telegram.org/bot${token}/sendPhoto`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      chat_id: chatId,
+      photo: photoFileId,
+      caption
+    })
+  });
+
+  const payload = (await response.json()) as TelegramSendResponse;
+
+  if (!response.ok || !payload.ok) {
+    console.error("telegram-send-photo-error", payload.description ?? response.statusText);
+    throw new Error(payload.description ?? "Telegram sendPhoto failed.");
+  }
+
+  return payload.result?.message_id;
+}
+
+function largestPhotoFileId(photo?: TelegramMessage["photo"]): string | null {
+  if (!photo || photo.length === 0) return null;
+
+  const sorted = [...photo].sort((a, b) => {
+    const aSize = a.file_size ?? a.width ?? 0;
+    const bSize = b.file_size ?? b.width ?? 0;
+    return bSize - aSize;
+  });
+
+  return sorted[0]?.file_id ?? null;
 }
 
 function createTicketCode(): string {
@@ -125,9 +193,12 @@ export async function POST(request: Request) {
       return NextResponse.json({ ok: true, ignored: "guardian_group" });
     }
 
-    const text = (message.text ?? message.caption ?? "").trim();
+    const hasPhoto = Array.isArray(message.photo) && message.photo.length > 0;
+    const caption = (message.caption ?? "").trim();
+    const text = (message.text ?? caption).trim();
+    const clientMessageText = text || (hasPhoto ? "Image/screenshot sent by client." : "");
 
-    if (!text) {
+    if (!clientMessageText) {
       return NextResponse.json({ ok: true, ignored: "empty_message" });
     }
 
@@ -138,8 +209,8 @@ export async function POST(request: Request) {
         telegram_chat_id: chatId,
         telegram_user_id: message.from?.id ?? null,
         telegram_username: message.from?.username ?? null,
-        message_text: text,
-        message_type: "client",
+        message_text: clientMessageText,
+        message_type: hasPhoto ? "client_photo" : "client",
         raw_payload: update
       })
       .select("id")
@@ -151,8 +222,12 @@ export async function POST(request: Request) {
     }
     console.log("telegram-message-saved", { chatId, messageId: message.message_id, rowId: storedMessage?.id });
 
-    const classification = classifyIntent(text);
-    const guardianMessage = buildGuardianMirrorMessage(text) ?? text;
+    const classification = classifyIntent(clientMessageText);
+    const requiresMark = hasPhoto ? true : classification.requiresMark;
+    const shouldReply = hasPhoto ? true : classification.shouldReply;
+    const guardianMessage = hasPhoto
+      ? (text ? (buildGuardianMirrorMessage(text) ?? text) : "Client sent an image/screenshot.")
+      : (buildGuardianMirrorMessage(clientMessageText) ?? clientMessageText);
 
     const { data: ticket, error: ticketError } = await supabase
       .from("tickets")
@@ -163,10 +238,10 @@ export async function POST(request: Request) {
         client_user_id: message.from?.id ?? null,
         client_username: message.from?.username ?? null,
         intent: classification.intent,
-        status: classification.requiresMark ? "waiting_mark" : "closed",
+        status: requiresMark ? "waiting_mark" : "closed",
         priority: ["deposit_funds", "refund_request", "payment_issue", "check_policy"].includes(classification.intent) ? "high" : "normal",
-        needs_mark: classification.requiresMark,
-        client_original_message: text,
+        needs_mark: requiresMark,
+        client_original_message: clientMessageText,
         extracted_data: classification.extractedData,
         internal_summary: classification.internalSummary
       })
@@ -179,13 +254,26 @@ export async function POST(request: Request) {
     }
     console.log("telegram-ticket-created", { chatId, messageId: message.message_id, ticketId: ticket?.id });
 
-    if (!classification.requiresMark || !classification.shouldReply) {
+    if (!requiresMark || !shouldReply) {
       return NextResponse.json({ ok: true, saved: true, ignored: "no_action", ticketId: ticket?.id ?? null });
     }
 
     const holdingMessage = classification.holdingMessage || HOLDING_MESSAGE;
     const holdingMessageId = await sendTelegramMessage(botToken, chatId, holdingMessage);
-    const guardianMessageId = await sendTelegramMessage(botToken, markGroupChatId, guardianMessage);
+    let guardianMessageId: number | undefined;
+
+    if (hasPhoto) {
+      const fallbackPhotoFileId = largestPhotoFileId(message.photo);
+      try {
+        guardianMessageId = await copyTelegramMessage(botToken, markGroupChatId, chatId, message.message_id, guardianMessage);
+      } catch (copyError) {
+        if (!fallbackPhotoFileId) throw copyError;
+        console.error("telegram-copy-message-fallback", copyError);
+        guardianMessageId = await sendTelegramPhoto(botToken, markGroupChatId, fallbackPhotoFileId, guardianMessage);
+      }
+    } else {
+      guardianMessageId = await sendTelegramMessage(botToken, markGroupChatId, guardianMessage);
+    }
 
     const { error: ticketMessageIdsError } = await supabase
       .from("tickets")
