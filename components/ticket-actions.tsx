@@ -91,7 +91,7 @@ export function TicketActions({ ticketId, ticketIntent, clientUsername, recommen
 
   function selectAction(actionType: MarkActionType, buttonId?: string) {
     setSelectedAction(actionType);
-    setSelectedButtonId(buttonId);
+    setSelectedButtonId(buttonId ?? "");
     setMessage(null);
     setError(null);
   }
