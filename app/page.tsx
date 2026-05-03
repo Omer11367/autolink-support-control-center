@@ -1,12 +1,12 @@
 import Link from "next/link";
-import { AlertTriangle, Clock3, Inbox, Sparkles } from "lucide-react";
+import { AlertTriangle, CheckCircle2, Clock3, Inbox, Sparkles, Users } from "lucide-react";
 import { EmptyState } from "@/components/empty-state";
 import { MetricCard } from "@/components/metric-card";
 import { StatusBadge } from "@/components/status-badge";
 import { TicketFilters } from "@/components/ticket-filters";
 import { Card } from "@/components/ui";
 import { formatIntentLabel } from "@/lib/display";
-import { getEscalationState } from "@/lib/operations";
+import { formatDurationMinutes, getEscalationState, getTicketTimerLabel } from "@/lib/operations";
 import { getClientOptions, getDashboardStats } from "@/lib/tickets";
 import { truncate } from "@/lib/utils";
 
@@ -34,13 +34,47 @@ export default async function DashboardPage({ searchParams }: DashboardPageProps
       </header>
 
       <section className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+        <MetricCard label="Total Open Tickets" value={stats.totalOpenTickets} icon={Inbox} />
+        <MetricCard label="Resolved Today" value={stats.resolvedToday} icon={CheckCircle2} />
+        <MetricCard label="Tickets Waiting" value={stats.ticketsWaitingOpen} icon={Clock3} helper="Open tickets waiting on Mark" />
+        <MetricCard label="Longest Open Ticket" value={formatDurationMinutes(stats.longestOpenMinutes)} icon={AlertTriangle} />
+      </section>
+
+      <section className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
         <MetricCard label="Total" value={stats.totalTickets} icon={Inbox} />
         <MetricCard label="New" value={stats.newTickets} icon={Sparkles} />
-        <MetricCard label="Waiting" value={stats.waitingForMark} icon={Clock3} />
         <MetricCard label="Urgent" value={stats.waitingOver30Minutes} icon={AlertTriangle} />
+        <MetricCard
+          label="Avg Resolution"
+          value={formatDurationMinutes(stats.averageResolutionMinutes)}
+          icon={CheckCircle2}
+        />
       </section>
 
       <TicketFilters clients={clients} basePath="/" showTicketFilters={false} />
+
+      <Card>
+        <div className="flex items-center justify-between gap-3">
+          <h2 className="text-lg font-bold">Tickets per client</h2>
+          <Users className="h-5 w-5 text-muted-foreground" aria-hidden="true" />
+        </div>
+        {stats.ticketsByClient.length === 0 ? (
+          <p className="mt-3 text-sm text-muted-foreground">No open client tickets.</p>
+        ) : (
+          <div className="mt-4 grid gap-2 md:grid-cols-2 xl:grid-cols-3">
+            {stats.ticketsByClient.map((client) => (
+              <Link
+                key={client.client}
+                href={`/tickets?client=${encodeURIComponent(client.client)}`}
+                className="rounded-md border border-border bg-muted px-3 py-2 transition hover:bg-zinc-800"
+              >
+                <span className="block truncate text-sm font-semibold">{client.label}</span>
+                <span className="text-xs text-muted-foreground">{client.openCount} open</span>
+              </Link>
+            ))}
+          </div>
+        )}
+      </Card>
 
       <Card className="p-0">
         <div className="border-b border-border p-4">
@@ -59,6 +93,7 @@ export default async function DashboardPage({ searchParams }: DashboardPageProps
                   <th className="px-4 py-3">Intent</th>
                   <th className="px-4 py-3">Status</th>
                   <th className="px-4 py-3">SLA</th>
+                  <th className="px-4 py-3">Timer</th>
                   <th className="px-4 py-3">Message</th>
                   <th className="px-4 py-3">Open</th>
                 </tr>
@@ -78,6 +113,7 @@ export default async function DashboardPage({ searchParams }: DashboardPageProps
                           <StatusBadge value="waiting_for_mark" label="Needs attention" />
                         )}
                       </td>
+                      <td className="px-4 py-3 text-muted-foreground">{getTicketTimerLabel(ticket)}</td>
                       <td className="max-w-md px-4 py-3 text-muted-foreground">
                         <span className="block truncate">{truncate(ticket.client_original_message, 120)}</span>
                       </td>

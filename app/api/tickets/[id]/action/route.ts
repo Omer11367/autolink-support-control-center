@@ -66,18 +66,35 @@ export async function POST(request: Request, { params }: { params: { id: string 
       return NextResponse.json({ error: actionError.message }, { status: 500 });
     }
 
+    const updatedAt = new Date().toISOString();
+    const updatePayload: Record<string, unknown> = {
+      status,
+      needs_mark: false,
+      completion_message: completionMessage || ticket.completion_message,
+      updated_at: updatedAt,
+      closed_at: updatedAt
+    };
+
     const { error: updateError } = await supabase
       .from("tickets")
-      .update({
-        status,
-        needs_mark: false,
-        completion_message: completionMessage || ticket.completion_message,
-        updated_at: new Date().toISOString()
-      })
+      .update(updatePayload)
       .eq("id", params.id);
 
     if (updateError) {
-      return NextResponse.json({ error: updateError.message }, { status: 500 });
+      if (updateError.message.toLowerCase().includes("closed_at")) {
+        const fallbackPayload = { ...updatePayload };
+        delete fallbackPayload.closed_at;
+        const { error: fallbackUpdateError } = await supabase
+          .from("tickets")
+          .update(fallbackPayload)
+          .eq("id", params.id);
+
+        if (fallbackUpdateError) {
+          return NextResponse.json({ error: fallbackUpdateError.message }, { status: 500 });
+        }
+      } else {
+        return NextResponse.json({ error: updateError.message }, { status: 500 });
+      }
     }
 
     let telegramSent = false;

@@ -6,7 +6,7 @@ import { StatusBadge } from "@/components/status-badge";
 import { TicketActions } from "@/components/ticket-actions";
 import { Card } from "@/components/ui";
 import { formatIntentLabel } from "@/lib/display";
-import { getActionRecommendation, getEscalationState } from "@/lib/operations";
+import { getActionRecommendation, getEscalationState, getTicketTimerLabel } from "@/lib/operations";
 import { getTicketDetail } from "@/lib/tickets";
 import { formatDate } from "@/lib/utils";
 import type { Json, Message } from "@/lib/types";
@@ -223,6 +223,7 @@ export default async function TicketDetailPage({ params }: { params: { id: strin
           <p className="mt-1 text-xs text-muted-foreground">
             {formatIntentLabel(ticket.intent)} | Created {formatDate(ticket.created_at)}
           </p>
+          <p className="mt-1 text-xs font-medium text-muted-foreground">{getTicketTimerLabel(ticket)}</p>
         </div>
         <div className="flex flex-wrap gap-2">
           <StatusBadge value={ticket.status} />

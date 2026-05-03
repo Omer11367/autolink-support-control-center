@@ -19,6 +19,48 @@ export function getTicketAgeMinutes(createdAt?: string | null): number | null {
   return Math.max(0, Math.floor((Date.now() - created) / 60000));
 }
 
+export function isResolvedTicketStatus(status?: string | null): boolean {
+  return ["done", "resolved", "closed"].includes((status ?? "").toLowerCase());
+}
+
+export function isOpenTicketStatus(status?: string | null): boolean {
+  return !isResolvedTicketStatus(status);
+}
+
+export function getMinutesBetween(start?: string | null, end?: string | null): number | null {
+  if (!start || !end) return null;
+  const startTime = new Date(start).getTime();
+  const endTime = new Date(end).getTime();
+  if (Number.isNaN(startTime) || Number.isNaN(endTime)) return null;
+  return Math.max(0, Math.floor((endTime - startTime) / 60000));
+}
+
+export function getTicketTimerMinutes(ticket: Pick<Ticket, "status" | "created_at" | "updated_at" | "closed_at">): number | null {
+  if (isResolvedTicketStatus(ticket.status)) {
+    return getMinutesBetween(ticket.created_at, ticket.closed_at ?? ticket.updated_at);
+  }
+
+  return getTicketAgeMinutes(ticket.created_at);
+}
+
+export function formatDurationMinutes(minutes: number | null): string {
+  if (minutes === null) return "Unknown";
+  if (minutes < 60) return `${minutes} min`;
+
+  const hours = Math.floor(minutes / 60);
+  const remainingMinutes = minutes % 60;
+  if (hours < 24) return remainingMinutes > 0 ? `${hours}h ${remainingMinutes}m` : `${hours}h`;
+
+  const days = Math.floor(hours / 24);
+  const remainingHours = hours % 24;
+  return remainingHours > 0 ? `${days}d ${remainingHours}h` : `${days}d`;
+}
+
+export function getTicketTimerLabel(ticket: Pick<Ticket, "status" | "created_at" | "updated_at" | "closed_at">): string {
+  const duration = formatDurationMinutes(getTicketTimerMinutes(ticket));
+  return isResolvedTicketStatus(ticket.status) ? `Resolved in: ${duration}` : `Open for: ${duration}`;
+}
+
 export function getEscalationState(ticket: Pick<Ticket, "status" | "created_at">): "none" | "needs_attention" | "urgent" {
   const status = (ticket.status ?? "unknown").toLowerCase();
   if (!["new", "open", "waiting_mark", "waiting_for_mark"].includes(status)) return "none";

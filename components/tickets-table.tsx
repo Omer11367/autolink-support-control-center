@@ -5,7 +5,7 @@ import { useRouter } from "next/navigation";
 import { CopyButton } from "@/components/copy-button";
 import { StatusBadge } from "@/components/status-badge";
 import { formatIntentLabel } from "@/lib/display";
-import { getEscalationState } from "@/lib/operations";
+import { getEscalationState, getTicketTimerLabel } from "@/lib/operations";
 import type { Ticket } from "@/lib/types";
 import { formatDate, truncate } from "@/lib/utils";
 
@@ -22,6 +22,7 @@ export function TicketsTable({ tickets }: { tickets: Ticket[] }) {
             <th className="px-4 py-3">Intent</th>
             <th className="px-4 py-3">Status</th>
             <th className="px-4 py-3">SLA</th>
+            <th className="px-4 py-3">Timer</th>
             <th className="px-4 py-3">Created</th>
             <th className="px-4 py-3">Message</th>
             <th className="px-4 py-3">Action</th>
@@ -36,7 +37,9 @@ export function TicketsTable({ tickets }: { tickets: Ticket[] }) {
               <tr
                 key={ticket.id}
                 onClick={() => router.push(`/tickets/${ticket.id}`)}
-                className="cursor-pointer transition hover:bg-muted/70"
+                className={`cursor-pointer transition hover:bg-muted/70 ${
+                  sla === "urgent" ? "bg-danger/10" : sla === "needs_attention" ? "bg-warning/10" : ""
+                }`}
               >
                 <td className="px-4 py-3">
                   <div className="flex items-center gap-2">
@@ -63,6 +66,7 @@ export function TicketsTable({ tickets }: { tickets: Ticket[] }) {
                     <StatusBadge value="normal" type="neutral" label="OK" />
                   )}
                 </td>
+                <td className="px-4 py-3 text-muted-foreground">{getTicketTimerLabel(ticket)}</td>
                 <td className="px-4 py-3 text-muted-foreground">{formatDate(ticket.created_at)}</td>
                 <td className="max-w-sm px-4 py-3 text-muted-foreground">
                   <span className="block truncate">{truncate(ticket.client_original_message, 130)}</span>

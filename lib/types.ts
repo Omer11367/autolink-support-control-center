@@ -22,6 +22,7 @@ export type Ticket = {
   completion_message: string | null;
   created_at: string | null;
   updated_at: string | null;
+  closed_at?: string | null;
 };
 
 export type MarkAction = {
@@ -93,4 +94,10 @@ export type DashboardStats = {
   recentTickets: Ticket[];
   attentionTickets: Ticket[];
   topIntents: Array<{ intent: string; count: number }>;
+  totalOpenTickets: number;
+  resolvedToday: number;
+  ticketsWaitingOpen: number;
+  longestOpenMinutes: number | null;
+  averageResolutionMinutes: number | null;
+  ticketsByClient: Array<{ client: string; label: string; openCount: number }>;
 };
