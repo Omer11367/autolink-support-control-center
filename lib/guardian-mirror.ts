@@ -13,6 +13,23 @@ function toStringList(values: unknown): string[] {
   return values.map(String).filter(Boolean);
 }
 
+function readDetectedActions(values: unknown): Array<{ type: string; account?: string; accounts?: string[]; bm?: string }> {
+  if (!Array.isArray(values)) return [];
+
+  return values.flatMap((value) => {
+    if (!value || typeof value !== "object" || Array.isArray(value)) return [];
+    const action = value as { type?: unknown; account?: unknown; accounts?: unknown; bm?: unknown };
+    if (typeof action.type !== "string") return [];
+
+    return [{
+      type: action.type,
+      account: typeof action.account === "string" ? action.account : undefined,
+      accounts: toStringList(action.accounts),
+      bm: typeof action.bm === "string" ? action.bm : undefined
+    }];
+  });
+}
+
 function uniqueValues(values: string[]): string[] {
   const seen = new Set<string>();
   const result: string[] = [];
@@ -79,7 +96,7 @@ function collectValuesAfterLabel(tokens: string[], startIndex: number, labelType
     const isOtherLabel = labelType === "account" ? bmLabelLength > 0 : accountLabelLength > 0;
     const isAccessWord = ["full", "partial", "view", "access", "admin", "management", "limited"].includes(key);
     const isRequestWord = ["status", "check", "active", "blocked", "disabled", "usable", "available", "availability"].includes(key);
-    const isConnector = ["to", "into", "for", "from", "with", "please", "pls"].includes(key);
+    const isConnector = ["to", "into", "for", "from", "with", "and", "then", "please", "pls"].includes(key);
 
     if (isOtherLabel || isAccessWord || isRequestWord) break;
     if (isConnector && values.length > 0) break;
@@ -150,6 +167,22 @@ function extractRequestedAccountCount(message: string): string | null {
   return match?.[1] ?? null;
 }
 
+function formatMirrorAction(action: { type: string; account?: string; accounts?: string[]; bm?: string }): string | null {
+  const accounts = action.accounts && action.accounts.length > 0 ? action.accounts.join(", ") : action.account;
+  if (!accounts) return null;
+
+  if (action.type === "share_account" && action.bm) {
+    return `Please share ad account ${accounts} to BM ${action.bm}.`;
+  }
+
+  if (action.type === "unshare_account") {
+    const bmPart = action.bm ? ` from ${action.bm}` : " from all BMs";
+    return `Please remove access${bmPart} for ad account ${accounts}.`;
+  }
+
+  return null;
+}
+
 export function buildGuardianMirrorMessage(message: string, previousContext = ""): string | null {
   const cleanMessage = message.trim();
   if (!cleanMessage || shouldIgnoreTelegramMessage(cleanMessage)) return null;
@@ -165,6 +198,12 @@ export function buildGuardianMirrorMessage(message: string, previousContext = ""
   const adAccountIds = joinList(parsedEntities.adAccountValues) || joinList(fallbackAdAccountValues);
   const accountNames = joinList(classification.extractedData.accountNames);
   const access = classification.accessLevel !== "not_specified" ? classification.accessLevel : "";
+  const detectedActions = readDetectedActions(classification.extractedData.actions);
+  const mirrorActions = detectedActions.map(formatMirrorAction).filter((action): action is string => Boolean(action));
+
+  if (mirrorActions.length > 1) {
+    return mirrorActions.join(" ");
+  }
 
   // Guardian messages should read like normal human requests: no ticket codes, labels, or JSON.
   if (classification.intent === "share_ad_account" && !hasLabeledShareEntities) {

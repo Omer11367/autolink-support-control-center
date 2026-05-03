@@ -195,7 +195,7 @@ function collectLabeledValues(tokens: string[], startIndex: number, labelType: "
     const accountLabelLength = isAccountLabel(tokens, index);
     const bmLabelLength = isBmLabel(tokens, index);
     const isOtherLabel = labelType === "account" ? bmLabelLength > 0 : accountLabelLength > 0;
-    const isStopWord = ["to", "into", "for", "from", "with", "full", "partial", "view", "access", "admin", "management", "limited", "need", "needs", "verify", "verification", "check", "status", "card"].includes(key);
+    const isStopWord = ["to", "into", "for", "from", "with", "and", "then", "full", "partial", "view", "access", "admin", "management", "limited", "need", "needs", "verify", "verification", "check", "status", "card"].includes(key);
 
     if (isOtherLabel || (isStopWord && values.length > 0)) break;
     if (isStopWord) {
@@ -258,6 +258,99 @@ function firstAccountValue(values: string[]): string | undefined {
   return values.find(Boolean);
 }
 
+function actionFromValues(type: "share_account" | "unshare_account", accounts: string[], bm?: string): DetectedAction | null {
+  const cleanAccounts = uniqueStrings(accounts.map(cleanEntityToken).filter(Boolean));
+  const cleanBm = cleanEntityToken(bm ?? "");
+  if (cleanAccounts.length === 0) return null;
+
+  return {
+    type,
+    ...(cleanAccounts.length === 1 ? { account: cleanAccounts[0] } : { accounts: cleanAccounts }),
+    ...(cleanBm ? { bm: cleanBm } : {})
+  };
+}
+
+function readTokenValuesUntilStop(tokens: string[], startIndex: number, stopWords: string[]): string[] {
+  const values: string[] = [];
+  let index = startIndex;
+
+  while (index < tokens.length) {
+    const key = tokenKey(tokens[index] ?? "");
+    if (stopWords.includes(key)) break;
+
+    const tokenValues = (tokens[index] ?? "")
+      .split(/[,;&]+/)
+      .map(cleanEntityToken)
+      .filter((value) => /^[A-Za-z0-9_-]+$/.test(value));
+
+    values.push(...tokenValues);
+    index += 1;
+  }
+
+  return values.filter((value) => !["account", "accounts", "acc", "accs", "ad", "this", "these", "those"].includes(value.toLowerCase()));
+}
+
+function extractAccountsFromActionSegment(segment: string, actionType: "share_account" | "unshare_account"): string[] {
+  const labeled = extractLabeledShareEntities(segment).adAccountIds;
+  if (labeled.length > 0) return labeled;
+
+  const tokens = segment.split(/\s+/).filter(Boolean);
+  const actionWords = actionType === "share_account"
+    ? ["share", "add", "connect", "link", "attach"]
+    : ["unshare", "remove", "disconnect", "unlink", "revoke"];
+  const startIndex = tokens.findIndex((token) => actionWords.includes(tokenKey(token)));
+  if (startIndex < 0) return [];
+
+  return uniqueStrings(readTokenValuesUntilStop(tokens, startIndex + 1, [
+    "to",
+    "into",
+    "from",
+    "bm",
+    "bms",
+    "business",
+    "manager",
+    "managers",
+    "with",
+    "full",
+    "partial",
+    "view",
+    "access",
+    "and"
+  ]));
+}
+
+function extractBmFromActionSegment(segment: string, actionType: "share_account" | "unshare_account"): string {
+  if (actionType === "unshare_account" && /\b(?:all\s+bms?|all\s+business\s+managers|all)\b/i.test(segment)) {
+    return "ALL BMs";
+  }
+
+  const labeled = extractLabeledShareEntities(segment).bmIds;
+  if (labeled.length > 0) return labeled.join(", ");
+
+  const match = segment.match(/\b(?:to|into|from)\s+(?:bm|bms|business\s+managers?)\s+([A-Za-z0-9_-]+)/i);
+  return cleanEntityToken(match?.[1] ?? "");
+}
+
+function splitActionSegments(message: string): Array<{ type: "share_account" | "unshare_account"; text: string }> {
+  const actionPattern = /\b(unshare|remove|disconnect|unlink|revoke|share|add|connect|link|attach)\b/gi;
+  const matches = Array.from(message.matchAll(actionPattern));
+  const segments: Array<{ type: "share_account" | "unshare_account"; text: string }> = [];
+
+  for (let index = 0; index < matches.length; index += 1) {
+    const match = matches[index];
+    const keyword = match[1]?.toLowerCase();
+    const start = match.index ?? 0;
+    const end = matches[index + 1]?.index ?? message.length;
+    const type = ["unshare", "remove", "disconnect", "unlink", "revoke"].includes(keyword ?? "")
+      ? "unshare_account"
+      : "share_account";
+
+    segments.push({ type, text: message.slice(start, end).trim() });
+  }
+
+  return segments;
+}
+
 function extractAccountList(message: string): string[] {
   const lineValues = message
     .split(/\r?\n/)
@@ -274,6 +367,18 @@ function extractAccountList(message: string): string[] {
 
 function extractShareActions(message: string): DetectedAction[] {
   const actions: DetectedAction[] = [];
+  const actionSegments = splitActionSegments(message);
+
+  for (const segment of actionSegments) {
+    const accounts = extractAccountsFromActionSegment(segment.text, segment.type);
+    const bm = extractBmFromActionSegment(segment.text, segment.type);
+    const action = actionFromValues(segment.type, accounts, segment.type === "unshare_account" && !bm ? "ALL BMs" : bm);
+
+    if (action) addAction(actions, action);
+  }
+
+  if (actions.length > 0) return actions;
+
   const shareMatch = message.match(/\b(?:share|add|connect|link|attach)\b[\s\S]*?\b(?:ad\s+)?accounts?\s+([A-Za-z0-9_-]+)[\s\S]*?\b(?:to|into)\s+(?:bm|business\s+manager)\s+([A-Za-z0-9_-]+)/i);
   const fallbackShare = extractLabeledShareEntities(message);
   const sharedAccount = cleanEntityToken(shareMatch?.[1] ?? firstAccountValue(fallbackShare.adAccountIds) ?? "");
