@@ -12,48 +12,49 @@ type ActionButtonConfig = {
   id: string;
   label: string;
   actionType: MarkActionType;
+  message: string;
 };
 
 const ACTION_BUTTONS_BY_INTENT: Record<string, ActionButtonConfig[]> = {
   share_account: [
-    { id: "share-done", label: "Done", actionType: "done" },
-    { id: "share-already-shared", label: "Already Shared", actionType: "already_shared" },
-    { id: "share-view-access", label: "Only View Access", actionType: "only_view_access" },
-    { id: "share-request-bm", label: "Request BM ID", actionType: "handled" },
-    { id: "share-request-account", label: "Request Account ID", actionType: "handled" },
-    { id: "share-access-updated", label: "Access Updated", actionType: "done" }
+    { id: "share-done", label: "Done", actionType: "done", message: "This is done. Kindly check on your end. Thank you!" },
+    { id: "share-already-shared", label: "Already Shared", actionType: "already_shared", message: "Hello @{{username}}, this is already shared. Kindly check." },
+    { id: "share-view-access", label: "Only View Access", actionType: "only_view_access", message: "The BM currently has view access only. Please confirm if full access is needed." },
+    { id: "share-request-bm", label: "Request BM ID", actionType: "handled", message: "Hello @{{username}}, please send the correct BM ID." },
+    { id: "share-request-account", label: "Request Account ID", actionType: "handled", message: "Hello @{{username}}, please send the ad account ID." },
+    { id: "share-access-updated", label: "Access Updated", actionType: "done", message: "Hello @{{username}}, access has been updated. Please check." }
   ],
   unshare_account: [
-    { id: "unshare-removed", label: "Removed", actionType: "done" },
-    { id: "unshare-already-removed", label: "Already Removed", actionType: "already_shared" },
-    { id: "unshare-confirm-removal", label: "Confirm Removal", actionType: "handled" },
-    { id: "unshare-request-bm", label: "Request BM ID", actionType: "handled" },
-    { id: "unshare-request-account", label: "Request Account ID", actionType: "handled" },
-    { id: "unshare-partial-removal", label: "Partial Removal", actionType: "handled" }
+    { id: "unshare-removed", label: "Removed", actionType: "done", message: "This has been removed. Kindly check on your end." },
+    { id: "unshare-already-removed", label: "Already Removed", actionType: "already_shared", message: "Hello @{{username}}, this is already removed." },
+    { id: "unshare-confirm-removal", label: "Confirm Removal", actionType: "handled", message: "Hello @{{username}}, the account has been removed. Please confirm." },
+    { id: "unshare-request-bm", label: "Request BM ID", actionType: "handled", message: "Hello @{{username}}, please confirm the BM ID." },
+    { id: "unshare-request-account", label: "Request Account ID", actionType: "handled", message: "Hello @{{username}}, please send the ad account ID." },
+    { id: "unshare-partial-removal", label: "Partial Removal", actionType: "handled", message: "Hello @{{username}}, some accounts were removed. Please check." }
   ],
   deposit: [
-    { id: "deposit-funds-arrived", label: "Funds Arrived", actionType: "funds_arrived" },
-    { id: "deposit-payment-confirmed", label: "Payment Confirmed", actionType: "done" },
-    { id: "deposit-checking-payment", label: "Checking Payment", actionType: "handled" },
-    { id: "deposit-request-proof", label: "Request Proof", actionType: "handled" },
-    { id: "deposit-amount-mismatch", label: "Amount Mismatch", actionType: "handled" },
-    { id: "deposit-pending-confirmation", label: "Pending Confirmation", actionType: "handled" }
+    { id: "deposit-funds-arrived", label: "Funds Arrived", actionType: "funds_arrived", message: "Hello @{{username}}, we received your funds. Please check your balance." },
+    { id: "deposit-payment-confirmed", label: "Payment Confirmed", actionType: "done", message: "Hello @{{username}}, your payment has been confirmed on our side. Thank you!" },
+    { id: "deposit-checking-payment", label: "Checking Payment", actionType: "handled", message: "Hello @{{username}}, we are currently checking your payment." },
+    { id: "deposit-request-proof", label: "Request Proof", actionType: "handled", message: "Hello @{{username}}, please send the payment proof so we can verify it." },
+    { id: "deposit-amount-mismatch", label: "Amount Mismatch", actionType: "handled", message: "Hello @{{username}}, the amount received does not match. Please confirm the amount sent." },
+    { id: "deposit-pending-confirmation", label: "Pending Confirmation", actionType: "handled", message: "Hello @{{username}}, the payment is still pending confirmation." }
   ],
   verification: [
-    { id: "verification-checking", label: "Checking Verification", actionType: "handled" },
-    { id: "verification-completed", label: "Verification Completed", actionType: "done" },
-    { id: "verification-still-required", label: "Still Required", actionType: "handled" },
-    { id: "verification-request-screenshot", label: "Request Screenshot", actionType: "handled" },
-    { id: "verification-card-check", label: "Card Check", actionType: "handled" },
-    { id: "verification-failed", label: "Failed Verification", actionType: "handled" }
+    { id: "verification-checking", label: "Checking Verification", actionType: "handled", message: "Hello @{{username}}, we are checking the verification now." },
+    { id: "verification-completed", label: "Verification Completed", actionType: "done", message: "Hello @{{username}}, verification has been completed. Please check." },
+    { id: "verification-still-required", label: "Still Required", actionType: "handled", message: "Hello @{{username}}, verification is still required on this account." },
+    { id: "verification-request-screenshot", label: "Request Screenshot", actionType: "handled", message: "Hello @{{username}}, please send a screenshot of the verification issue." },
+    { id: "verification-card-check", label: "Card Check", actionType: "handled", message: "Hello @{{username}}, we are checking the card verification now." },
+    { id: "verification-failed", label: "Failed Verification", actionType: "handled", message: "Hello @{{username}}, verification failed. Please check the account details." }
   ],
   general_support: [
-    { id: "general-checking", label: "Checking", actionType: "handled" },
-    { id: "general-understood", label: "Understood", actionType: "handled" },
-    { id: "general-request-info", label: "Request Info", actionType: "handled" },
-    { id: "general-request-screenshot", label: "Request Screenshot", actionType: "handled" },
-    { id: "general-resolved", label: "Resolved", actionType: "done" },
-    { id: "general-friendly", label: "Friendly", actionType: "handled" }
+    { id: "general-checking", label: "Checking", actionType: "handled", message: "Hello @{{username}}, we are checking this now." },
+    { id: "general-understood", label: "Understood", actionType: "handled", message: "Hello @{{username}}, understood." },
+    { id: "general-request-info", label: "Request Info", actionType: "handled", message: "Hello @{{username}}, please send more details." },
+    { id: "general-request-screenshot", label: "Request Screenshot", actionType: "handled", message: "Hello @{{username}}, please send a screenshot." },
+    { id: "general-resolved", label: "Resolved", actionType: "done", message: "Hello @{{username}}, this has been resolved. Please check." },
+    { id: "general-friendly", label: "Friendly", actionType: "handled", message: "Hello @{{username}}, happy to help." }
   ]
 };
 
@@ -67,6 +68,11 @@ function actionIntentKey(intent?: string | null) {
 
 function getActionButtons(intent?: string | null) {
   return ACTION_BUTTONS_BY_INTENT[actionIntentKey(intent)];
+}
+
+function formatButtonMessage(message: string, username?: string | null) {
+  const handle = username ? `@${username.replace(/^@/, "")}` : "@client";
+  return message.replaceAll("@{{username}}", handle);
 }
 
 type TicketActionsProps = {
@@ -85,13 +91,25 @@ export function TicketActions({ ticketId, ticketIntent, clientUsername, recommen
   const initialAction = initialButton?.actionType ?? "handled";
   const [selectedAction, setSelectedAction] = useState<MarkActionType>(initialAction);
   const [selectedButtonId, setSelectedButtonId] = useState(initialButton?.id);
+  const [selectedButtonMessage, setSelectedButtonMessage] = useState(
+    initialButton ? formatButtonMessage(initialButton.message, clientUsername) : ""
+  );
   const [message, setMessage] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [isPending, startTransition] = useTransition();
 
-  function selectAction(actionType: MarkActionType, buttonId?: string) {
-    setSelectedAction(actionType);
-    setSelectedButtonId(buttonId ?? "");
+  function selectAction(button: ActionButtonConfig) {
+    setSelectedAction(button.actionType);
+    setSelectedButtonId(button.id);
+    setSelectedButtonMessage(formatButtonMessage(button.message, clientUsername));
+    setMessage(null);
+    setError(null);
+  }
+
+  function selectCustomReply() {
+    setSelectedAction("custom_reply");
+    setSelectedButtonId("");
+    setSelectedButtonMessage("");
     setMessage(null);
     setError(null);
   }
@@ -101,7 +119,10 @@ export function TicketActions({ ticketId, ticketIntent, clientUsername, recommen
       const response = await fetch(`/api/tickets/${ticketId}/action`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ actionType: selectedAction, customReply })
+        body: JSON.stringify({
+          actionType: selectedButtonMessage ? "custom_reply" : selectedAction,
+          customReply: selectedButtonMessage || customReply
+        })
       });
 
       const payload = await response.json();
@@ -122,7 +143,7 @@ export function TicketActions({ ticketId, ticketIntent, clientUsername, recommen
 
   const previewMessage = selectedAction === "close"
     ? "Close will update the ticket to closed and will not send Telegram."
-    : resolveCompletionMessage(selectedAction, clientUsername, customReply, ticketIntent) || "Write a custom reply to preview the message.";
+    : selectedButtonMessage || resolveCompletionMessage(selectedAction, clientUsername, customReply, ticketIntent) || "Write a custom reply to preview the message.";
 
   return (
     <div className="space-y-4">
@@ -130,7 +151,7 @@ export function TicketActions({ ticketId, ticketIntent, clientUsername, recommen
         {actionButtons.map((button) => (
           <Button
             key={button.id}
-            onClick={() => selectAction(button.actionType, button.id)}
+            onClick={() => selectAction(button)}
             disabled={isPending}
             className={selectedButtonId === button.id ? "ring-2 ring-primary/40" : ""}
           >
@@ -146,10 +167,10 @@ export function TicketActions({ ticketId, ticketIntent, clientUsername, recommen
           id="custom-reply"
           value={customReply}
           onChange={(event) => setCustomReply(event.target.value)}
-          onFocus={() => selectAction("custom_reply")}
+          onFocus={selectCustomReply}
           placeholder="Write exact client-facing response"
         />
-        <Button onClick={() => selectAction("custom_reply")} disabled={isPending || !customReply.trim()}>
+        <Button onClick={selectCustomReply} disabled={isPending || !customReply.trim()}>
           <Send className="h-4 w-4" aria-hidden="true" />
           Preview custom reply
         </Button>
