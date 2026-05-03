@@ -258,6 +258,54 @@ export const ACTION_COMPLETION_MESSAGES = {
 
 export type MarkActionType = keyof typeof ACTION_COMPLETION_MESSAGES | "close" | "custom_reply";
 
+type SendableMarkActionType = Exclude<MarkActionType, "close" | "custom_reply">;
+type IntentActionMessages = Partial<Record<SendableMarkActionType, string>>;
+
+const INTENT_ACTION_COMPLETION_MESSAGES: Record<string, IntentActionMessages> = {
+  share_account: {
+    done: "This is done. Kindly check on your end. Thank you!",
+    already_shared: "Hello @client, this is already shared. Kindly check on your end. Thank you!",
+    only_view_access:
+      "Upon checking, the BM has been granted view access only. Please confirm if full access is needed."
+  },
+  share_ad_account: {
+    done: "This is done. Kindly check on your end. Thank you!",
+    already_shared: "Hello @client, this is already shared. Kindly check on your end. Thank you!",
+    only_view_access:
+      "Upon checking, the BM has been granted view access only. Please confirm if full access is needed."
+  },
+  unshare_account: {
+    done: "Removed from the BM, please check.",
+    already_shared: "The BM has already been removed from the mentioned account(s). Kindly check on your end.",
+    handled: "Access has been removed."
+  },
+  unshare_ad_account: {
+    done: "Removed from the BM, please check.",
+    already_shared: "The BM has already been removed from the mentioned account(s). Kindly check on your end.",
+    handled: "Access has been removed."
+  },
+  remove_account: {
+    done: "Removed from the BM, please check.",
+    already_shared: "The BM has already been removed from the mentioned account(s). Kindly check on your end.",
+    handled: "Access has been removed."
+  },
+  deposit: {
+    done: "Payment is confirmed on our side.",
+    funds_arrived: "Hello @client! Funds have been successfully added to your dashboard wallet. 😊",
+    handled: "Funds received, thank you."
+  },
+  deposit_funds: {
+    done: "Payment is confirmed on our side.",
+    funds_arrived: "Hello @client! Funds have been successfully added to your dashboard wallet. 😊",
+    handled: "Funds received, thank you."
+  },
+  payment_check: {
+    done: "Payment is confirmed on our side.",
+    funds_arrived: "Hello @client! Funds have been successfully added to your dashboard wallet. 😊",
+    handled: "Funds received, thank you."
+  }
+};
+
 export function actionLabel(action: MarkActionType) {
   return action
     .split("_")
@@ -265,10 +313,17 @@ export function actionLabel(action: MarkActionType) {
     .join(" ");
 }
 
-export function resolveCompletionMessage(action: MarkActionType, username?: string | null, customText?: string) {
+export function resolveCompletionMessage(
+  action: MarkActionType,
+  username?: string | null,
+  customText?: string,
+  intent?: string | null
+) {
   if (action === "close") return "";
   if (action === "custom_reply") return customText?.trim() ?? "";
 
   const handle = username ? `@${username.replace(/^@/, "")}` : "@client";
-  return ACTION_COMPLETION_MESSAGES[action].replaceAll("@client", handle);
+  const intentMessage = intent ? INTENT_ACTION_COMPLETION_MESSAGES[intent]?.[action] : undefined;
+  const message = intentMessage ?? ACTION_COMPLETION_MESSAGES[action];
+  return message.replaceAll("@client", handle);
 }

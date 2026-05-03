@@ -46,7 +46,7 @@ export async function POST(request: Request, { params }: { params: { id: string 
     }
 
     const ticket = ticketRow as Ticket;
-    const completionMessage = resolveCompletionMessage(actionType, ticket.client_username, body.customReply);
+    const completionMessage = resolveCompletionMessage(actionType, ticket.client_username, body.customReply, ticket.intent);
     const status = nextStatus(actionType);
 
     const { error: actionError } = await supabase.from("mark_actions").insert({

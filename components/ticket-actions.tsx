@@ -19,11 +19,12 @@ const actionTypes: MarkActionType[] = [
 
 type TicketActionsProps = {
   ticketId: string;
+  ticketIntent?: string | null;
   clientUsername?: string | null;
   recommendation: ActionRecommendation;
 };
 
-export function TicketActions({ ticketId, clientUsername, recommendation }: TicketActionsProps) {
+export function TicketActions({ ticketId, ticketIntent, clientUsername, recommendation }: TicketActionsProps) {
   const router = useRouter();
   const [customReply, setCustomReply] = useState("");
   const initialAction = recommendation.action === "reclassify_first" ? "handled" : recommendation.action;
@@ -64,7 +65,7 @@ export function TicketActions({ ticketId, clientUsername, recommendation }: Tick
 
   const previewMessage = selectedAction === "close"
     ? "Close will update the ticket to closed and will not send Telegram."
-    : resolveCompletionMessage(selectedAction, clientUsername, customReply) || "Write a custom reply to preview the message.";
+    : resolveCompletionMessage(selectedAction, clientUsername, customReply, ticketIntent) || "Write a custom reply to preview the message.";
 
   return (
     <div className="space-y-4">

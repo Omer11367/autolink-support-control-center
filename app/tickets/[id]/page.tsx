@@ -304,6 +304,7 @@ export default async function TicketDetailPage({ params }: { params: { id: strin
           <div className="mt-4">
             <TicketActions
               ticketId={ticket.id}
+              ticketIntent={ticket.intent}
               clientUsername={ticket.client_username}
               recommendation={recommendation}
             />
