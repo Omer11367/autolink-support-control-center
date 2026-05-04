@@ -29,11 +29,20 @@ type TelegramMessage = {
     height?: number;
     file_size?: number;
   }>;
+  document?: {
+    file_id: string;
+    file_unique_id?: string;
+    file_name?: string;
+    mime_type?: string;
+    file_size?: number;
+  };
 };
 
 type TelegramUpdate = {
   update_id: number;
   message?: TelegramMessage;
+  edited_message?: TelegramMessage;
+  channel_post?: TelegramMessage;
 };
 
 type TelegramSendResponse = {
@@ -130,6 +139,27 @@ async function sendTelegramPhoto(token: string, chatId: number | string, photoFi
   return payload.result?.message_id;
 }
 
+async function sendTelegramDocument(token: string, chatId: number | string, documentFileId: string, caption: string) {
+  const response = await fetch(`https://api.telegram.org/bot${token}/sendDocument`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      chat_id: chatId,
+      document: documentFileId,
+      caption
+    })
+  });
+
+  const payload = (await response.json()) as TelegramSendResponse;
+
+  if (!response.ok || !payload.ok) {
+    console.error("telegram-send-document-error", payload.description ?? response.statusText);
+    throw new Error(payload.description ?? "Telegram sendDocument failed.");
+  }
+
+  return payload.result?.message_id;
+}
+
 function largestPhotoFileId(photo?: TelegramMessage["photo"]): string | null {
   if (!photo || photo.length === 0) return null;
 
@@ -140,6 +170,10 @@ function largestPhotoFileId(photo?: TelegramMessage["photo"]): string | null {
   });
 
   return sorted[0]?.file_id ?? null;
+}
+
+function isImageDocument(document?: TelegramMessage["document"]): boolean {
+  return Boolean(document?.file_id && document.mime_type?.toLowerCase().startsWith("image/"));
 }
 
 function createTicketCode(): string {
@@ -181,7 +215,7 @@ export async function POST(request: Request) {
     });
 
     const update = (await request.json()) as TelegramUpdate;
-    const message = update.message;
+    const message = update.message ?? update.edited_message ?? update.channel_post;
 
     if (!message?.chat?.id) {
       return NextResponse.json({ ok: true, ignored: "no_message" });
@@ -194,9 +228,11 @@ export async function POST(request: Request) {
     }
 
     const hasPhoto = Array.isArray(message.photo) && message.photo.length > 0;
+    const hasImageDocument = isImageDocument(message.document);
+    const hasImageAttachment = hasPhoto || hasImageDocument;
     const caption = (message.caption ?? "").trim();
     const text = (message.text ?? caption).trim();
-    const clientMessageText = text || (hasPhoto ? "Image/screenshot sent by client." : "");
+    const clientMessageText = text || (hasImageAttachment ? "Image/screenshot sent by client." : "");
 
     if (!clientMessageText) {
       return NextResponse.json({ ok: true, ignored: "empty_message" });
@@ -210,7 +246,7 @@ export async function POST(request: Request) {
         telegram_user_id: message.from?.id ?? null,
         telegram_username: message.from?.username ?? null,
         message_text: clientMessageText,
-        message_type: hasPhoto ? "client_photo" : "client",
+        message_type: hasImageAttachment ? "client_photo" : "client",
         raw_payload: update
       })
       .select("id")
@@ -223,9 +259,9 @@ export async function POST(request: Request) {
     console.log("telegram-message-saved", { chatId, messageId: message.message_id, rowId: storedMessage?.id });
 
     const classification = classifyIntent(clientMessageText);
-    const requiresMark = hasPhoto ? true : classification.requiresMark;
-    const shouldReply = hasPhoto ? true : classification.shouldReply;
-    const guardianMessage = hasPhoto
+    const requiresMark = hasImageAttachment ? true : classification.requiresMark;
+    const shouldReply = hasImageAttachment ? true : classification.shouldReply;
+    const guardianMessage = hasImageAttachment
       ? (text ? (buildGuardianMirrorMessage(text) ?? text) : "Client sent an image/screenshot.")
       : (buildGuardianMirrorMessage(clientMessageText) ?? clientMessageText);
 
@@ -262,15 +298,31 @@ export async function POST(request: Request) {
     const holdingMessageId = await sendTelegramMessage(botToken, chatId, holdingMessage);
     let guardianMessageId: number | undefined;
 
-    if (hasPhoto) {
+    if (hasImageAttachment) {
       const fallbackPhotoFileId = largestPhotoFileId(message.photo);
+      const fallbackDocumentFileId = hasImageDocument ? message.document?.file_id : null;
+      console.log("telegram-media-forward-start", {
+        chatId,
+        messageId: message.message_id,
+        hasPhoto,
+        hasImageDocument,
+        markGroupChatIdConfigured: Boolean(markGroupChatId)
+      });
+
       try {
         guardianMessageId = await copyTelegramMessage(botToken, markGroupChatId, chatId, message.message_id, guardianMessage);
       } catch (copyError) {
-        if (!fallbackPhotoFileId) throw copyError;
         console.error("telegram-copy-message-fallback", copyError);
-        guardianMessageId = await sendTelegramPhoto(botToken, markGroupChatId, fallbackPhotoFileId, guardianMessage);
+        if (fallbackPhotoFileId) {
+          guardianMessageId = await sendTelegramPhoto(botToken, markGroupChatId, fallbackPhotoFileId, guardianMessage);
+        } else if (fallbackDocumentFileId) {
+          guardianMessageId = await sendTelegramDocument(botToken, markGroupChatId, fallbackDocumentFileId, guardianMessage);
+        } else {
+          throw copyError;
+        }
       }
+
+      console.log("telegram-media-forwarded", { ticketId: ticket?.id, guardianMessageId });
     } else {
       guardianMessageId = await sendTelegramMessage(botToken, markGroupChatId, guardianMessage);
     }
