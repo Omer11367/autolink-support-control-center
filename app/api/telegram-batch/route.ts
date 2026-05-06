@@ -150,7 +150,6 @@ async function handleBatch(request: Request) {
     .eq("needs_mark", true)
     .in("status", ["open", "new", "waiting_mark", "waiting_for_mark"])
     .is("internal_message_id", null)
-    .is("holding_message_id", null)
     .order("created_at", { ascending: true })
     .limit(100);
 
@@ -165,6 +164,7 @@ async function handleBatch(request: Request) {
     return NextResponse.json({ ok: true, count: 0 });
   }
 
+  console.log("mark-batch-ready", { count: tickets.length });
   const markSummary = buildMarkSummary(tickets);
   const markSendResult = await maybeSendTelegramMessage({ chatId: markGroupChatId, text: markSummary });
   if (!markSendResult.sent || !markSendResult.telegramMessageId) {

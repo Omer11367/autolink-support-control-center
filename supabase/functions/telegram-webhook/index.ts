@@ -1,5 +1,5 @@
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
-import { buildGuardianMirrorMessage, shouldIgnoreTelegramMessage } from "../../../lib/guardian-mirror.ts";
+import { shouldIgnoreTelegramMessage } from "../../../lib/guardian-mirror.ts";
 import { classifyIntent } from "../../../lib/intent-classifier.ts";
 
 type TelegramChat = {
@@ -105,7 +105,6 @@ Deno.serve(async (request) => {
     }
 
     const classification = classifyIntent(text);
-    const guardianMessage = buildGuardianMirrorMessage(text) ?? text;
 
     const { data: storedMessage, error: messageError } = await supabase
       .from("messages")
@@ -124,7 +123,8 @@ Deno.serve(async (request) => {
     if (messageError) throw new Error(messageError.message);
 
     const holdingMessageId = await sendTelegramMessage(botToken, chatId, HOLDING_MESSAGE);
-    const guardianMessageId = await sendTelegramMessage(botToken, guardianChatId, guardianMessage);
+    console.log("instant-mark-forward-path-found", { chatId, messageId: message.message_id });
+    console.log("instant-mark-forward-disabled", { chatId, messageId: message.message_id });
 
     const { data: ticket, error: ticketError } = await supabase
       .from("tickets")
@@ -142,12 +142,20 @@ Deno.serve(async (request) => {
         extracted_data: classification.extractedData,
         internal_summary: classification.internalSummary,
         holding_message_id: holdingMessageId ?? null,
-        internal_message_id: guardianMessageId ?? null
+        internal_message_id: null
       })
       .select("id")
       .single();
 
     if (ticketError) throw new Error(ticketError.message);
+    if (classification.requiresMark) {
+      console.log("request-added-to-mark-batch", {
+        chatId,
+        messageId: message.message_id,
+        ticketId: ticket?.id ?? null,
+        intent: classification.intent
+      });
+    }
 
     await supabase.from("bot_responses").insert([
       {
@@ -156,13 +164,6 @@ Deno.serve(async (request) => {
         telegram_message_id: holdingMessageId ?? null,
         response_type: "holding",
         response_text: HOLDING_MESSAGE
-      },
-      {
-        ticket_id: ticket?.id ?? null,
-        telegram_chat_id: Number(guardianChatId),
-        telegram_message_id: guardianMessageId ?? null,
-        response_type: "guardian_mirror",
-        response_text: guardianMessage
       }
     ]);
 
