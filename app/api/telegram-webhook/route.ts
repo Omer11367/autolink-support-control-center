@@ -568,8 +568,7 @@ export async function POST(request: Request) {
     console.log("telegram-message-saved", { chatId, messageId: message.message_id, rowId: storedMessage?.id });
     if (!hasImageAttachment) {
       console.log("text-message-queued", { chatId, messageId: message.message_id, rowId: storedMessage?.id });
-      await sendTelegramMessage(botToken, markGroupChatId, clientMessageText);
-      console.log("conversation-burst-message-forwarded", { chatId, messageId: message.message_id });
+      console.log("conversation-burst-message-held-for-batch", { chatId, messageId: message.message_id });
     }
 
     const storedMessageRow = (storedMessage ?? null) as StoredMessageRow | null;
@@ -1148,7 +1147,7 @@ export async function POST(request: Request) {
       return NextResponse.json({ ok: true, saved: true, ignored: "no_tickets_from_burst" });
     }
 
-    const shouldSendOneHolding = createdTickets.some((ticketItem) => ticketItem.classification.requiresMark && ticketItem.classification.shouldReply);
+    const shouldSendOneHolding = false;
     let holdingMessageId: number | undefined;
     let holdingMessage: string | null = null;
     if (shouldSendOneHolding) {
