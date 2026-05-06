@@ -1043,7 +1043,15 @@ export async function POST(request: Request) {
     }
 
     const intentBuckets = new Map<string, string[]>();
-    if (!hasImageAttachment && burstMessages.length > 0) {
+    const burstGroupingClasses = burstMessages
+      .map((row) => classifyTicketGrouping(row.message_text?.trim() ?? ""))
+      .filter((groupingClass) => groupingClass !== "smalltalk");
+    const standaloneBurstCount = burstGroupingClasses.filter((groupingClass) => groupingClass === "standalone_request").length;
+    const shouldKeepBurstTogether = !hasImageAttachment && burstMessages.length > 1 && standaloneBurstCount <= 1;
+
+    if (shouldKeepBurstTogether) {
+      intentBuckets.set(classification.intent || "general_support", burstMessages.map((row) => row.message_text?.trim() ?? "").filter(Boolean));
+    } else if (!hasImageAttachment && burstMessages.length > 0) {
       for (const row of burstMessages) {
         const raw = row.message_text?.trim() ?? "";
         if (!raw) continue;
@@ -1073,6 +1081,14 @@ export async function POST(request: Request) {
 
     for (const [intent, texts] of intentEntries) {
       const groupedText = texts.join(" ").replace(/\s+/g, " ").trim();
+      if (texts.length > 1) {
+        console.log("google-sheets-grouped-message-created", {
+          chatId,
+          messageId: message.message_id,
+          intent,
+          fragmentCount: texts.length
+        });
+      }
       const groupedClassification = classifyIntent(groupedText);
       const groupedRequiresMark = groupedClassification.requiresMark;
       const { data: createdTicket, error: createTicketError } = await supabase
@@ -1115,7 +1131,8 @@ export async function POST(request: Request) {
           originalMessage: groupedText,
           parsedMessage: groupedClassification.internalSummary || groupedText,
           intent: intent || groupedClassification.intent,
-          status: "Pending"
+          status: "Pending",
+          extractedData: groupedClassification.extractedData
         });
         console.log("google-sheets-write-success", { chatId, ticketId: createdTicket.id });
       } catch (error) {
