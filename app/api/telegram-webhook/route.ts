@@ -824,11 +824,7 @@ export async function POST(request: Request) {
         console.error("supabase-insert-error", { table: "ticket_notes", message: noteError.message });
       }
 
-      const contextForwardMessage = contextClass === "follow_up"
-        ? `FOLLOW-UP FROM CLIENT:\n${contextText}`
-        : contextClass === "correction"
-          ? `CORRECTION FROM CLIENT:\n${contextText}`
-          : `ADDITIONAL INFO FROM CLIENT:\n${contextText}`;
+      const contextForwardMessage = contextText;
       console.log("mark-message-private-safe", {
         chatId,
         messageId: message.message_id,
@@ -837,7 +833,7 @@ export async function POST(request: Request) {
 
       let guardianMessageId: number | undefined;
       if (hasImageAttachment) {
-        const captionForContext = `${contextForwardMessage}\n${caption || "Image/screenshot sent by client."}`;
+        const captionForContext = caption || contextText || "Image/screenshot sent by client.";
         const fallbackPhotoFileId = largestPhotoFileId(message.photo);
         const fallbackDocumentFileId = hasImageDocument ? message.document?.file_id : null;
         try {
@@ -850,8 +846,6 @@ export async function POST(request: Request) {
             guardianMessageId = await sendTelegramDocument(botToken, markGroupChatId, fallbackDocumentFileId, captionForContext);
           }
         }
-      } else {
-        guardianMessageId = await sendTelegramMessage(botToken, markGroupChatId, contextForwardMessage);
       }
       if (contextClass === "follow_up") {
         console.log("follow-up-with-ticket-context", { chatId, ticketId: latestTicket.id, ticketCode: latestTicket.ticket_code ?? null });
@@ -961,7 +955,7 @@ export async function POST(request: Request) {
     const shouldReply = hasImageAttachment ? true : classification.shouldReply;
     const guardianMessage = hasImageAttachment
       ? (text ? (buildGuardianMirrorMessage(text) ?? text) : "Client sent an image/screenshot.")
-      : `NEW REQUEST:\n${combinedClientMessageText}`;
+      : combinedClientMessageText;
     if (!hasImageAttachment) {
       console.log("mark-message-private-safe", {
         chatId,
@@ -1164,14 +1158,11 @@ export async function POST(request: Request) {
       for (let index = 0; index < createdTickets.length; index += 1) {
         const ticketItem = createdTickets[index];
         if (!ticketItem.classification.requiresMark) continue;
-        const groupedGuardianMessage = `NEW REQUEST:\n${ticketItem.groupedText}`;
-        const guardianMessageId = await sendTelegramMessage(botToken, markGroupChatId, groupedGuardianMessage);
-
         const { error: idsError } = await supabase
           .from("tickets")
           .update({
             holding_message_id: index === 0 ? (holdingMessageId ?? null) : null,
-            internal_message_id: guardianMessageId ?? null
+            internal_message_id: null
           })
           .eq("id", ticketItem.id);
         if (idsError) {
@@ -1187,14 +1178,7 @@ export async function POST(request: Request) {
                 response_type: "holding",
                 response_text: holdingMessage
               }
-            : null,
-          {
-            ticket_id: ticketItem.id,
-            telegram_chat_id: Number(markGroupChatId),
-            telegram_message_id: guardianMessageId ?? null,
-            response_type: "guardian_mirror",
-            response_text: groupedGuardianMessage
-          }
+            : null
         ].filter(Boolean) as Array<{
           ticket_id: string;
           telegram_chat_id: number;
@@ -1203,9 +1187,11 @@ export async function POST(request: Request) {
           response_text: string;
         }>;
 
-        const { error: botResponsesError } = await supabase.from("bot_responses").insert(responsesToInsert);
-        if (botResponsesError) {
-          console.error("supabase-insert-error", { table: "bot_responses", message: botResponsesError.message });
+        if (responsesToInsert.length > 0) {
+          const { error: botResponsesError } = await supabase.from("bot_responses").insert(responsesToInsert);
+          if (botResponsesError) {
+            console.error("supabase-insert-error", { table: "bot_responses", message: botResponsesError.message });
+          }
         }
       }
     }
