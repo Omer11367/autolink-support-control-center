@@ -69,9 +69,13 @@ type ContextClass =
 
 type TicketRow = {
   id: string;
+  ticket_code?: string | null;
   status: string | null;
   priority: string | null;
   client_chat_id: string | number | null;
+  client_username?: string | null;
+  client_original_message?: string | null;
+  internal_message_id?: string | number | null;
   created_at: string | null;
   updated_at: string | null;
 };
@@ -233,15 +237,11 @@ function hasAnyPhrase(text: string, phrases: string[]): boolean {
   return phrases.some((phrase) => text.includes(phrase));
 }
 
-function chooseGreetingMessage(): string {
-  const variants = [
-    "Hey, how can I help you today?",
-    "Hi, how can I help?",
-    "Hey, what can I help you with?",
-    "Hi, tell me what you need and I’ll check it."
-  ];
-  const index = Math.floor(Math.random() * variants.length);
-  return variants[index] ?? variants[0];
+function chooseGreetingMessage(normalizedText: string): string {
+  if (normalizedText.includes("good morning")) return "Good morning, how can I help?";
+  if (normalizedText.includes("good evening") || normalizedText.includes("good night")) return "Good evening, how can I help?";
+  const variants = ["Hey, how can I help you today?", "Hi, how can I help?", "Hey, what can I help you with?", "Hi, tell me what you need and I’ll check it."];
+  return variants[Math.floor(Math.random() * variants.length)] ?? variants[0];
 }
 
 function chooseContextAck(contextClass: ContextClass): string {
@@ -274,6 +274,55 @@ function normalizeComparableText(text: string): string {
   return text.toLowerCase().replace(/\s+/g, " ").trim();
 }
 
+type TextKind = "greeting_only" | "thanks_only" | "close_only" | "support_request";
+
+function classifyIncomingTextKind(text: string): TextKind {
+  const normalized = normalizeComparableText(text).replace(/[!?.,]+$/g, "");
+  const greetingPhrases = [
+    "hey",
+    "hi",
+    "hello",
+    "hola",
+    "yo",
+    "bro",
+    "good morning",
+    "good evening",
+    "good night",
+    "how are you",
+    "how are you guys"
+  ];
+  const thanksPhrases = ["thanks", "thank you", "ok thanks", "okay thanks", "thx", "ty"];
+  const closePhrases = ["ok", "okay", "alright", "👍", "👌", "🙏", "received", "noted"];
+  const supportSignals = [
+    "share",
+    "unshare",
+    "deposit",
+    "funds",
+    "refund",
+    "verify",
+    "request account",
+    "need account",
+    "availability",
+    "issue",
+    "check",
+    "status",
+    "problem",
+    "help",
+    "can you",
+    "please",
+    "sent",
+    "$",
+    "usd"
+  ];
+
+  const hasSupportSignals = hasAnyPhrase(normalized, supportSignals);
+  if (hasSupportSignals) return "support_request";
+  if (thanksPhrases.includes(normalized)) return "thanks_only";
+  if (greetingPhrases.includes(normalized)) return "greeting_only";
+  if (closePhrases.includes(normalized)) return "close_only";
+  return "support_request";
+}
+
 function messageFragmentsLookRelated(a: string, b: string): boolean {
   const aa = normalizeComparableText(a);
   const bb = normalizeComparableText(b);
@@ -290,8 +339,26 @@ function classifyContextLayer(messageText: string, hasImageAttachment: boolean, 
   const normalized = messageText.trim().toLowerCase();
   if (!normalized && hasImageAttachment && hasOpenTicket) return "extra_info";
 
-  const followUpPhrases = ["any update", "update?", "hello?", "??", "status?", "done?", "waiting", "wait?", "still waiting", "where are you"];
-  const correctionPhrases = ["no wait", "wrong", "sorry", "use this", "instead", "different bm", "not this", "ignore previous", "change it"];
+  const followUpPhrases = ["any update", "update?", "status?", "done?", "waiting", "wait?", "still waiting", "where are you", "hello??", "hello?"];
+  const correctionPhrases = [
+    "no wait",
+    "actually",
+    "wrong",
+    "not ",
+    "instead",
+    "changed",
+    "only approved",
+    "approved",
+    "i see now",
+    "please check",
+    "same one",
+    "this one",
+    "for this",
+    "use this",
+    "not this",
+    "ignore previous",
+    "change it"
+  ];
   const closePhrases = ["close", "cancel", "never mind", "nevermind", "resolved", "done thanks", "all good", "no need"];
   const extraInfoPhrases = ["bm", "account", "access", "id", "login", "password", "mail", "email", "screenshot", "image", "attached", "proof", "here it is"];
   const newRequestPhrases = [
@@ -386,7 +453,7 @@ export async function POST(request: Request) {
     const storedMessageRow = (storedMessage ?? null) as StoredMessageRow | null;
     const shouldDebounce = !hasImageAttachment;
     if (shouldDebounce) {
-      console.log("debounce-wait-start", { chatId, messageId: message.message_id, windowSeconds: DEBOUNCE_WINDOW_SECONDS });
+      console.log("debounce-quiet-window-start", { chatId, messageId: message.message_id, windowSeconds: DEBOUNCE_WINDOW_SECONDS });
       await sleep(DEBOUNCE_WINDOW_SECONDS * 1000);
     }
 
@@ -409,9 +476,12 @@ export async function POST(request: Request) {
     const recentMessages = (recentMessagesData ?? []) as StoredMessageRow[];
     const recentTextMessages = recentMessages.filter((row) => (row.message_type ?? "client") === "client" && Boolean(row.message_text?.trim()));
     const latestRecentTextMessage = recentTextMessages[recentTextMessages.length - 1];
+    if (!hasImageAttachment && recentTextMessages.length > 1) {
+      console.log("debounce-quiet-window-reset", { chatId, messageId: message.message_id, fragmentCount: recentTextMessages.length });
+    }
 
     if (!hasImageAttachment && latestRecentTextMessage && latestRecentTextMessage.id !== storedMessageRow?.id) {
-      console.log("debounce-buffer-flush", {
+      console.log("debounce-exit-before-ticket", {
         chatId,
         messageId: message.message_id,
         action: "skip_older_fragment",
@@ -430,10 +500,46 @@ export async function POST(request: Request) {
       combinedCount: !hasImageAttachment ? recentTextMessages.length : 1,
       combinedTextLength: combinedClientMessageText.length
     });
-    console.log("debounce-final-processing", { chatId, messageId: message.message_id, finalLength: combinedClientMessageText.length });
+    console.log("debounce-final-single-processing", { chatId, messageId: message.message_id, finalLength: combinedClientMessageText.length });
+
+    if (!hasImageAttachment) {
+      const textKind = classifyIncomingTextKind(combinedClientMessageText);
+      if (textKind === "greeting_only" || textKind === "thanks_only" || textKind === "close_only") {
+        console.log("smart-greeting-detected", { chatId, messageId: message.message_id, textKind });
+        console.log("smart-smalltalk-no-ticket", { chatId, messageId: message.message_id, textKind });
+        const greetingAckWindowStartIso = new Date(Date.now() - DEBOUNCE_WINDOW_SECONDS * 1000).toISOString();
+        const responseType = `smalltalk_${textKind}`;
+        const { data: recentGreetingAck } = await supabase
+          .from("bot_responses")
+          .select("id")
+          .eq("telegram_chat_id", chatId)
+          .eq("response_type", responseType)
+          .gte("created_at", greetingAckWindowStartIso)
+          .order("created_at", { ascending: false })
+          .limit(1);
+
+        if (!recentGreetingAck || recentGreetingAck.length === 0) {
+          if (textKind !== "close_only") {
+            const smallTalkReply = textKind === "thanks_only"
+              ? "You're welcome."
+              : chooseGreetingMessage(normalizeComparableText(combinedClientMessageText));
+            const greetingMessageId = await sendTelegramMessage(botToken, chatId, smallTalkReply);
+            await supabase.from("bot_responses").insert({
+              ticket_id: null,
+              telegram_chat_id: chatId,
+              telegram_message_id: greetingMessageId ?? null,
+              response_type: responseType,
+              response_text: smallTalkReply
+            });
+          }
+        }
+
+        return NextResponse.json({ ok: true, saved: true, ignored: "smart_smalltalk_no_ticket" });
+      }
+    }
 
     if (!hasImageAttachment && isGreetingOnly(combinedClientMessageText)) {
-      console.log("greeting-detected", { chatId, messageId: message.message_id });
+      console.log("smart-greeting-detected", { chatId, messageId: message.message_id, textKind: "greeting_only_legacy" });
       const greetingAckWindowStartIso = new Date(Date.now() - DEBOUNCE_WINDOW_SECONDS * 1000).toISOString();
       const { data: recentGreetingAck } = await supabase
         .from("bot_responses")
@@ -445,7 +551,7 @@ export async function POST(request: Request) {
         .limit(1);
 
       if (!recentGreetingAck || recentGreetingAck.length === 0) {
-        const greetingMessage = chooseGreetingMessage();
+        const greetingMessage = chooseGreetingMessage(normalizeComparableText(combinedClientMessageText));
         const greetingMessageId = await sendTelegramMessage(botToken, chatId, greetingMessage);
         await supabase.from("bot_responses").insert({
           ticket_id: null,
@@ -463,7 +569,7 @@ export async function POST(request: Request) {
     const recentTicketStartIso = new Date(Date.now() - RECENT_TICKET_WINDOW_HOURS * 60 * 60 * 1000).toISOString();
     const { data: latestTicketData, error: latestTicketError } = await supabase
       .from("tickets")
-      .select("id, status, priority, client_chat_id, created_at, updated_at")
+      .select("id, ticket_code, status, priority, client_chat_id, client_username, client_original_message, internal_message_id, created_at, updated_at")
       .eq("client_chat_id", chatId)
       .gte("created_at", recentTicketStartIso)
       .order("created_at", { ascending: false })
@@ -515,7 +621,29 @@ export async function POST(request: Request) {
         console.error("supabase-insert-error", { table: "ticket_notes", message: noteError.message });
       }
 
-      const contextForwardMessage = `[#${latestTicket.id}] ${contextPrefix}: ${contextText}`;
+      const clientLabel = message.chat.title?.trim() || message.from?.username || String(chatId);
+      const relatedRequest = String(latestTicket.client_original_message ?? "").trim() || "N/A";
+      const ticketLabel = latestTicket.ticket_code || latestTicket.id;
+      const statusLabel = latestTicket.status ?? "unknown";
+      const contextForwardMessage = contextClass === "follow_up"
+        ? [
+            "FOLLOW-UP FROM CLIENT",
+            `Client asks: ${contextText}`,
+            `Related request: ${relatedRequest}`,
+            `Ticket: ${ticketLabel}`,
+            `Status: ${statusLabel}`,
+            `Client: ${clientLabel}`
+          ].join("\n")
+        : contextClass === "correction"
+          ? [
+              "CORRECTION / UPDATE FROM CLIENT",
+              `Client says: ${contextText}`,
+              `Related request: ${relatedRequest}`,
+              `Ticket: ${ticketLabel}`,
+              `Status: ${statusLabel}`,
+              `Client: ${clientLabel}`
+            ].join("\n")
+          : `[#${latestTicket.id}] ${contextPrefix}: ${contextText}`;
 
       let guardianMessageId: number | undefined;
       if (hasImageAttachment) {
@@ -534,6 +662,9 @@ export async function POST(request: Request) {
         }
       } else {
         guardianMessageId = await sendTelegramMessage(botToken, markGroupChatId, contextForwardMessage);
+      }
+      if (contextClass === "follow_up") {
+        console.log("follow-up-with-ticket-context", { chatId, ticketId: latestTicket.id, ticketCode: latestTicket.ticket_code ?? null });
       }
 
       if (contextClass === "follow_up" && latestTicket.priority !== "high" && latestTicket.priority !== "urgent") {
@@ -574,6 +705,19 @@ export async function POST(request: Request) {
           console.error("supabase-update-error", { table: "tickets", message: correctionUpdateError.message });
         } else {
           console.log("correction-dashboard-updated", { chatId, ticketId: latestTicket.id });
+          console.log("dashboard-history-appended", { chatId, ticketId: latestTicket.id, updateType: "correction" });
+          console.log("correction-linked-to-existing-ticket", { chatId, ticketId: latestTicket.id, ticketCode: latestTicket.ticket_code ?? null });
+        }
+      } else if (contextClass === "extra_info" && hasImageAttachment) {
+        const imageNote = "Image/screenshot attached by client.";
+        const { error: imageNoteError } = await supabase.from("ticket_notes").insert({
+          ticket_id: latestTicket.id,
+          note_text: imageNote
+        });
+        if (imageNoteError) {
+          console.error("supabase-insert-error", { table: "ticket_notes", message: imageNoteError.message });
+        } else {
+          console.log("dashboard-history-appended", { chatId, ticketId: latestTicket.id, updateType: "image_extra_info" });
         }
       }
 
