@@ -161,6 +161,7 @@ async function handleBatch(request: Request) {
 
   if (tickets.length === 0) {
     console.log("batch-no-requests");
+    console.log("mark-batch-no-requests");
     return NextResponse.json({ ok: true, count: 0 });
   }
 
@@ -170,6 +171,7 @@ async function handleBatch(request: Request) {
     throw new Error(markSendResult.reason ?? "Mark batch summary was not sent.");
   }
   console.log("batch-mark-summary-sent", { count: tickets.length, telegramMessageId: markSendResult.telegramMessageId });
+  console.log("mark-batch-sent", { count: tickets.length, telegramMessageId: markSendResult.telegramMessageId });
 
   await supabase.from("bot_responses").insert({
     ticket_id: tickets[0]?.id ?? null,

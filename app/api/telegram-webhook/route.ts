@@ -568,6 +568,7 @@ export async function POST(request: Request) {
     console.log("telegram-message-saved", { chatId, messageId: message.message_id, rowId: storedMessage?.id });
     if (!hasImageAttachment) {
       console.log("text-message-queued", { chatId, messageId: message.message_id, rowId: storedMessage?.id });
+      console.log("instant-mark-forward-disabled", { chatId, messageId: message.message_id });
       console.log("conversation-burst-message-held-for-batch", { chatId, messageId: message.message_id });
     }
 
@@ -1121,6 +1122,14 @@ export async function POST(request: Request) {
         classification: groupedClassification
       });
       console.log("conversation-burst-ticket-created", { chatId, messageId: message.message_id, ticketId: createdTicket.id, intent: intent || groupedClassification.intent });
+      if (!hasImageAttachment && groupedRequiresMark) {
+        console.log("request-added-to-mark-batch", {
+          chatId,
+          messageId: message.message_id,
+          ticketId: createdTicket.id,
+          intent: intent || groupedClassification.intent
+        });
+      }
 
       try {
         console.log("google-sheets-write-start", { chatId, ticketId: createdTicket.id, intent: intent || groupedClassification.intent });
