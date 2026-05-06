@@ -59,6 +59,8 @@ const DEBOUNCE_WINDOW_SECONDS = 10;
 const DUPLICATE_WINDOW_SECONDS = 15;
 const LOGICAL_GROUP_WINDOW_SECONDS = 60;
 const RECENT_TICKET_WINDOW_HOURS = 24;
+const BURST_GAP_SECONDS = 6;
+const BURST_LOOKBACK_MINUTES = 10;
 
 type ContextClass =
   | "new_request"
@@ -395,6 +397,30 @@ function pickSafeHoldingMessage(defaultMessage: string): string {
   return safeVariants[Math.floor(Math.random() * safeVariants.length)] ?? safeVariants[0];
 }
 
+function buildBurstMessages(rows: StoredMessageRow[], latestRowId: string | null | undefined): StoredMessageRow[] {
+  const textRows = rows
+    .filter((row) => (row.message_type ?? "client") === "client" && Boolean(row.message_text?.trim()) && Boolean(row.created_at))
+    .sort((a, b) => new Date(a.created_at ?? 0).getTime() - new Date(b.created_at ?? 0).getTime());
+  if (textRows.length === 0) return [];
+
+  let latestIndex = latestRowId ? textRows.findIndex((row) => row.id === latestRowId) : -1;
+  if (latestIndex < 0) latestIndex = textRows.length - 1;
+
+  const burst: StoredMessageRow[] = [textRows[latestIndex]];
+  for (let idx = latestIndex - 1; idx >= 0; idx -= 1) {
+    const current = textRows[idx];
+    const next = burst[0];
+    const gapMs = new Date(next.created_at ?? 0).getTime() - new Date(current.created_at ?? 0).getTime();
+    if (gapMs <= BURST_GAP_SECONDS * 1000) {
+      burst.unshift(current);
+      continue;
+    }
+    break;
+  }
+
+  return burst;
+}
+
 type TextKind = "greeting_only" | "thanks_only" | "close_only" | "support_request";
 
 function classifyIncomingTextKind(text: string): TextKind {
@@ -538,6 +564,8 @@ export async function POST(request: Request) {
     console.log("telegram-message-saved", { chatId, messageId: message.message_id, rowId: storedMessage?.id });
     if (!hasImageAttachment) {
       console.log("text-message-queued", { chatId, messageId: message.message_id, rowId: storedMessage?.id });
+      await sendTelegramMessage(botToken, markGroupChatId, `NEW REQUEST:\n${clientMessageText}`);
+      console.log("conversation-burst-message-forwarded", { chatId, messageId: message.message_id });
     }
 
     const storedMessageRow = (storedMessage ?? null) as StoredMessageRow | null;
@@ -547,7 +575,7 @@ export async function POST(request: Request) {
       await sleep(DEBOUNCE_WINDOW_SECONDS * 1000);
     }
 
-    const debounceWindowStartIso = new Date(Date.now() - DUPLICATE_WINDOW_SECONDS * 1000).toISOString();
+    const debounceWindowStartIso = new Date(Date.now() - BURST_LOOKBACK_MINUTES * 60 * 1000).toISOString();
 
     console.log("debounce-buffer-start", { chatId, messageId: message.message_id, windowSeconds: DEBOUNCE_WINDOW_SECONDS });
     const { data: recentMessagesData, error: recentMessagesError } = await supabase
@@ -596,17 +624,8 @@ export async function POST(request: Request) {
       }
 
       console.log("latest-burst-processing", { chatId, messageId: message.message_id, rowId: storedMessageRow?.id ?? null });
-      const newestCreatedAtMs = newestTextMessage?.created_at ? new Date(newestTextMessage.created_at).getTime() : Date.now();
-      const logicalWindowStartMs = newestCreatedAtMs - LOGICAL_GROUP_WINDOW_SECONDS * 1000;
-      const { data: latestCreatedTicketData } = await supabase
-        .from("tickets")
-        .select("created_at")
-        .eq("client_chat_id", chatId)
-        .order("created_at", { ascending: false })
-        .limit(1)
-        .maybeSingle();
-      const latestCreatedTicketMs = latestCreatedTicketData?.created_at ? new Date(latestCreatedTicketData.created_at).getTime() : 0;
-      const burstWindowStartIso = new Date(Math.max(logicalWindowStartMs, latestCreatedTicketMs || 0)).toISOString();
+      console.log("conversation-burst-start", { chatId, messageId: message.message_id, burstGapSeconds: BURST_GAP_SECONDS });
+      const burstWindowStartIso = new Date(Date.now() - BURST_LOOKBACK_MINUTES * 60 * 1000).toISOString();
       const { data: burstMessagesData, error: burstMessagesError } = await supabase
         .from("messages")
         .select("id, created_at, message_text, message_type, telegram_message_id")
@@ -622,7 +641,8 @@ export async function POST(request: Request) {
         throw new Error(`Supabase burst messages query failed: ${burstMessagesError.message}`);
       }
 
-      burstMessages = (burstMessagesData ?? []) as StoredMessageRow[];
+      const lookbackRows = (burstMessagesData ?? []) as StoredMessageRow[];
+      burstMessages = buildBurstMessages(lookbackRows, newestTextMessage?.id ?? storedMessageRow?.id ?? null);
       if (burstMessages.length > 1) {
         console.log("debounce-quiet-window-reset", { chatId, messageId: message.message_id, fragmentCount: burstMessages.length });
       }
@@ -633,6 +653,11 @@ export async function POST(request: Request) {
         messageId: message.message_id,
         fragmentCount: burstMessages.length,
         text: combinedClientMessageText
+      });
+      console.log("conversation-burst-intents-detected", {
+        chatId,
+        messageId: message.message_id,
+        fragmentCount: burstMessages.length
       });
     }
 
@@ -1018,55 +1043,89 @@ export async function POST(request: Request) {
       }
     }
 
-    const { data: ticket, error: ticketError } = await supabase
-      .from("tickets")
-      .insert({
-        ticket_code: createTicketCode(),
-        client_chat_id: chatId,
-        client_message_id: storedMessage?.id ?? null,
-        client_user_id: message.from?.id ?? null,
-        client_username: message.from?.username ?? null,
-        intent: classification.intent,
-        status: requiresMark ? "waiting_mark" : "closed",
-        priority: ["deposit_funds", "refund_request", "payment_issue", "check_policy"].includes(classification.intent) ? "high" : "normal",
-        needs_mark: requiresMark,
-        client_original_message: combinedClientMessageText,
-        extracted_data: classification.extractedData,
-        internal_summary: classification.internalSummary
-      })
-      .select("id")
-      .single();
-
-    if (ticketError) {
-      console.error("supabase-insert-error", { table: "tickets", message: ticketError.message });
-      throw new Error(`Supabase tickets insert failed: ${ticketError.message}`);
+    const intentBuckets = new Map<string, string[]>();
+    if (!hasImageAttachment && burstMessages.length > 0) {
+      for (const row of burstMessages) {
+        const raw = row.message_text?.trim() ?? "";
+        if (!raw) continue;
+        const rowClassified = classifyIntent(raw);
+        const intent = rowClassified.intent || "general_support";
+        const existing = intentBuckets.get(intent) ?? [];
+        existing.push(raw);
+        intentBuckets.set(intent, existing);
+      }
+    } else {
+      intentBuckets.set(classification.intent || "general_support", [combinedClientMessageText]);
     }
-    console.log("telegram-ticket-created", { chatId, messageId: message.message_id, ticketId: ticket?.id });
-    console.log("logical-request-created", { chatId, messageId: message.message_id, ticketId: ticket?.id ?? null });
-    console.log("smart-new-ticket", { chatId, messageId: message.message_id, ticketId: ticket?.id ?? null });
-    if (!hasImageAttachment) {
-      console.log("single-ticket-created-from-burst", {
-        chatId,
-        messageId: message.message_id,
-        ticketId: ticket?.id ?? null
+
+    const intentEntries = Array.from(intentBuckets.entries()).filter(([, texts]) => texts.length > 0);
+    if (intentEntries.length > 1) {
+      console.log("conversation-burst-multi-intent-split", { chatId, messageId: message.message_id, intents: intentEntries.map(([intent]) => intent) });
+    } else if (intentEntries.length === 1) {
+      console.log("conversation-burst-same-intent-grouped", { chatId, messageId: message.message_id, intent: intentEntries[0][0] });
+    }
+
+    const createdTickets: Array<{
+      id: string;
+      intent: string;
+      groupedText: string;
+      classification: ReturnType<typeof classifyIntent>;
+    }> = [];
+
+    for (const [intent, texts] of intentEntries) {
+      const groupedText = texts.join(" ").replace(/\s+/g, " ").trim();
+      const groupedClassification = classifyIntent(groupedText);
+      const groupedRequiresMark = groupedClassification.requiresMark;
+      const { data: createdTicket, error: createTicketError } = await supabase
+        .from("tickets")
+        .insert({
+          ticket_code: createTicketCode(),
+          client_chat_id: chatId,
+          client_message_id: storedMessage?.id ?? null,
+          client_user_id: message.from?.id ?? null,
+          client_username: message.from?.username ?? null,
+          intent: intent || groupedClassification.intent,
+          status: groupedRequiresMark ? "waiting_mark" : "closed",
+          priority: ["deposit_funds", "refund_request", "payment_issue", "check_policy"].includes(groupedClassification.intent) ? "high" : "normal",
+          needs_mark: groupedRequiresMark,
+          client_original_message: groupedText,
+          extracted_data: groupedClassification.extractedData,
+          internal_summary: groupedClassification.internalSummary
+        })
+        .select("id")
+        .single();
+
+      if (createTicketError || !createdTicket?.id) {
+        console.error("supabase-insert-error", { table: "tickets", message: createTicketError?.message ?? "ticket insert failed" });
+        throw new Error(`Supabase tickets insert failed: ${createTicketError?.message ?? "Unknown error"}`);
+      }
+
+      createdTickets.push({
+        id: createdTicket.id,
+        intent: intent || groupedClassification.intent,
+        groupedText,
+        classification: groupedClassification
       });
+      console.log("conversation-burst-ticket-created", { chatId, messageId: message.message_id, ticketId: createdTicket.id, intent: intent || groupedClassification.intent });
     }
 
-    if (!requiresMark || !shouldReply) {
-      return NextResponse.json({ ok: true, saved: true, ignored: "no_action", ticketId: ticket?.id ?? null });
+    if (createdTickets.length === 0) {
+      return NextResponse.json({ ok: true, saved: true, ignored: "no_tickets_from_burst" });
     }
 
-    const holdingMessage = pickSafeHoldingMessage(classification.holdingMessage || HOLDING_MESSAGE);
-    const holdingMessageId = await sendTelegramMessage(botToken, chatId, holdingMessage);
-    console.log("holding-sent-once-for-group", {
-      chatId,
-      messageId: message.message_id,
-      ticketId: ticket?.id ?? null,
-      holdingMessageId: holdingMessageId ?? null
-    });
-    let guardianMessageId: number | undefined;
+    const shouldSendOneHolding = createdTickets.some((ticketItem) => ticketItem.classification.requiresMark && ticketItem.classification.shouldReply);
+    let holdingMessageId: number | undefined;
+    let holdingMessage: string | null = null;
+    if (shouldSendOneHolding) {
+      const firstHolding = createdTickets.find((ticketItem) => ticketItem.classification.requiresMark && ticketItem.classification.shouldReply);
+      holdingMessage = pickSafeHoldingMessage(firstHolding?.classification.holdingMessage || HOLDING_MESSAGE);
+      holdingMessageId = await sendTelegramMessage(botToken, chatId, holdingMessage);
+      console.log("conversation-burst-single-client-reply", { chatId, messageId: message.message_id, holdingMessageId: holdingMessageId ?? null });
+    }
 
     if (hasImageAttachment) {
+      const ticket = createdTickets[0];
+      let guardianMessageId: number | undefined;
       const fallbackPhotoFileId = largestPhotoFileId(message.photo);
       const fallbackDocumentFileId = hasImageDocument ? message.document?.file_id : null;
       console.log("telegram-media-forward-start", {
@@ -1090,47 +1149,65 @@ export async function POST(request: Request) {
         }
       }
 
-      console.log("telegram-media-forwarded", { ticketId: ticket?.id, guardianMessageId });
-    } else {
-      guardianMessageId = await sendTelegramMessage(botToken, markGroupChatId, guardianMessage);
-    }
-
-    const { error: ticketMessageIdsError } = await supabase
-      .from("tickets")
-      .update({
-        holding_message_id: holdingMessageId ?? null,
-        internal_message_id: guardianMessageId ?? null
-      })
-      .eq("id", ticket?.id);
-
-    if (ticketMessageIdsError) {
-      console.error("supabase-update-error", { table: "tickets", message: ticketMessageIdsError.message });
-      throw new Error(`Supabase tickets update failed: ${ticketMessageIdsError.message}`);
-    }
-    console.log("telegram-ticket-message-ids-updated", { ticketId: ticket?.id, holdingMessageId, guardianMessageId });
-
-    const { error: botResponsesError } = await supabase.from("bot_responses").insert([
-      {
-        ticket_id: ticket?.id ?? null,
-        telegram_chat_id: chatId,
-        telegram_message_id: holdingMessageId ?? null,
-        response_type: "holding",
-        response_text: holdingMessage
-      },
-      {
-        ticket_id: ticket?.id ?? null,
-        telegram_chat_id: Number(markGroupChatId),
-        telegram_message_id: guardianMessageId ?? null,
-        response_type: "guardian_mirror",
-        response_text: guardianMessage
+      const { error: singleUpdateError } = await supabase
+        .from("tickets")
+        .update({
+          holding_message_id: holdingMessageId ?? null,
+          internal_message_id: guardianMessageId ?? null
+        })
+        .eq("id", ticket.id);
+      if (singleUpdateError) {
+        console.error("supabase-update-error", { table: "tickets", message: singleUpdateError.message });
       }
-    ]);
+    } else {
+      for (let index = 0; index < createdTickets.length; index += 1) {
+        const ticketItem = createdTickets[index];
+        if (!ticketItem.classification.requiresMark) continue;
+        const groupedGuardianMessage = `NEW REQUEST:\n${ticketItem.groupedText}`;
+        const guardianMessageId = await sendTelegramMessage(botToken, markGroupChatId, groupedGuardianMessage);
 
-    if (botResponsesError) {
-      console.error("supabase-insert-error", { table: "bot_responses", message: botResponsesError.message });
-      throw new Error(`Supabase bot_responses insert failed: ${botResponsesError.message}`);
+        const { error: idsError } = await supabase
+          .from("tickets")
+          .update({
+            holding_message_id: index === 0 ? (holdingMessageId ?? null) : null,
+            internal_message_id: guardianMessageId ?? null
+          })
+          .eq("id", ticketItem.id);
+        if (idsError) {
+          console.error("supabase-update-error", { table: "tickets", message: idsError.message });
+        }
+
+        const responsesToInsert = [
+          index === 0 && holdingMessage
+            ? {
+                ticket_id: ticketItem.id,
+                telegram_chat_id: chatId,
+                telegram_message_id: holdingMessageId ?? null,
+                response_type: "holding",
+                response_text: holdingMessage
+              }
+            : null,
+          {
+            ticket_id: ticketItem.id,
+            telegram_chat_id: Number(markGroupChatId),
+            telegram_message_id: guardianMessageId ?? null,
+            response_type: "guardian_mirror",
+            response_text: groupedGuardianMessage
+          }
+        ].filter(Boolean) as Array<{
+          ticket_id: string;
+          telegram_chat_id: number;
+          telegram_message_id: number | null;
+          response_type: string;
+          response_text: string;
+        }>;
+
+        const { error: botResponsesError } = await supabase.from("bot_responses").insert(responsesToInsert);
+        if (botResponsesError) {
+          console.error("supabase-insert-error", { table: "bot_responses", message: botResponsesError.message });
+        }
+      }
     }
-    console.log("telegram-bot-responses-saved", { ticketId: ticket?.id });
 
     return NextResponse.json({ ok: true });
   } catch (error) {
