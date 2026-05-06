@@ -289,25 +289,6 @@ function classifyTicketGrouping(text: string): TicketGroupingClass {
   const smalltalkKind = classifyIncomingTextKind(normalized);
   if (smalltalkKind !== "support_request") return "smalltalk";
 
-  const newActionSignals = [
-    "send",
-    "sent",
-    "share account",
-    "share",
-    "unshare",
-    "bm",
-    "add account",
-    "verify",
-    "refund",
-    "issue",
-    "availability",
-    "need",
-    "request account",
-    "check account status",
-    "status check"
-  ];
-  if (hasAnyPhrase(normalized, newActionSignals)) return "standalone_request";
-
   const followUpPhrases = ["any update", "update?", "status?", "done?", "waiting", "wait?"];
   if (hasAnyPhrase(normalized, followUpPhrases)) return "follow_up";
 
@@ -317,7 +298,22 @@ function classifyTicketGrouping(text: string): TicketGroupingClass {
   if (/^\$|^usd$|^usdt$|^dollars?$/.test(normalized)) return "currency_fragment";
   if (/^(?:\d+(?:[.,]\d+)?(?:k)?|\d+(?:[.,]\d+)?\s*(?:usd|usdt|\$|dollars?))$/i.test(normalized)) return "amount_fragment";
 
-  const continuationPhrases = ["and one more", "one more", "also", "plus", "check this", "please check", "and", "more", "another"];
+  const continuationPhrases = [
+    "and one more",
+    "one more",
+    "also",
+    "plus",
+    "check this",
+    "check on this",
+    "please check",
+    "and",
+    "more",
+    "another",
+    "sent",
+    "send",
+    "paid",
+    "deposit"
+  ];
   if (hasAnyPhrase(normalized, continuationPhrases) || normalized.split(" ").length <= 3) return "continuation_fragment";
 
   return "standalone_request";
@@ -325,6 +321,8 @@ function classifyTicketGrouping(text: string): TicketGroupingClass {
 
 function isClearNewActionRequest(text: string): boolean {
   const normalized = normalizeComparableText(text);
+  const isBarePaymentVerb = /^(send|sent|paid|deposit)$/.test(normalized);
+  if (isBarePaymentVerb) return false;
   const signals = [
     "send",
     "sent",
@@ -379,10 +377,12 @@ function isFollowUpMessage(text: string): boolean {
 
 function isLogicalGroupReady(text: string, fragmentCount: number): boolean {
   const normalized = normalizeComparableText(text);
+  const incompleteOnly = /^(?:sent|send|paid|deposit|check on this|please check|check this|\d+(?:[.,]\d+)?k?|\$|usd|usdt|dollars?)$/i.test(normalized);
+  if (incompleteOnly) return false;
   const requestSignals = ["send", "sent", "share", "unshare", "deposit", "funds", "refund", "verify", "request", "need", "availability", "issue", "check"];
   if (hasAnyPhrase(normalized, requestSignals)) return true;
   if (/\$|usd|usdt|dollars?/i.test(normalized) && /\d/.test(normalized)) return true;
-  return fragmentCount >= 3;
+  return fragmentCount >= 4;
 }
 
 function pickSafeHoldingMessage(defaultMessage: string): string {
@@ -935,9 +935,7 @@ export async function POST(request: Request) {
     const shouldReply = hasImageAttachment ? true : classification.shouldReply;
     const guardianMessage = hasImageAttachment
       ? (text ? (buildGuardianMirrorMessage(text) ?? text) : "Client sent an image/screenshot.")
-      : ((groupedFromFragments || burstMessages.length > 1)
-        ? `GROUPED REQUEST:\n${combinedClientMessageText}`
-        : `NEW REQUEST:\n${combinedClientMessageText}`);
+      : `NEW REQUEST:\n${combinedClientMessageText}`;
     if (!hasImageAttachment) {
       console.log("mark-message-private-safe", {
         chatId,
