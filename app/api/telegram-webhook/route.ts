@@ -56,6 +56,7 @@ type TelegramSendResponse = {
 
 const HOLDING_MESSAGE = "Hello! I'll check this now and update you shortly.";
 const DEBOUNCE_WINDOW_SECONDS = 10;
+const DUPLICATE_WINDOW_SECONDS = 15;
 const RECENT_TICKET_WINDOW_HOURS = 24;
 
 type ContextClass =
@@ -82,6 +83,10 @@ type StoredMessageRow = {
   message_type: string | null;
   telegram_message_id: number | null;
 };
+
+function sleep(ms: number) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
 
 function firstEnv(names: string[]): string | undefined {
   for (const name of names) {
@@ -228,6 +233,59 @@ function hasAnyPhrase(text: string, phrases: string[]): boolean {
   return phrases.some((phrase) => text.includes(phrase));
 }
 
+function chooseGreetingMessage(): string {
+  const variants = [
+    "Hey, how can I help you today?",
+    "Hi, how can I help?",
+    "Hey, what can I help you with?",
+    "Hi, tell me what you need and I’ll check it."
+  ];
+  const index = Math.floor(Math.random() * variants.length);
+  return variants[index] ?? variants[0];
+}
+
+function chooseContextAck(contextClass: ContextClass): string {
+  if (contextClass === "follow_up") {
+    const variants = [
+      "Checking this now, I’ll update you shortly.",
+      "I’ll follow up on this now.",
+      "Let me check this and get back to you."
+    ];
+    const index = Math.floor(Math.random() * variants.length);
+    return variants[index] ?? variants[0];
+  }
+  if (contextClass === "correction") {
+    const variants = [
+      "Got it, I’ll update the team with the correction.",
+      "Understood, I’ll correct this with the team now."
+    ];
+    const index = Math.floor(Math.random() * variants.length);
+    return variants[index] ?? variants[0];
+  }
+  return "Got it, I’ll add this to the request.";
+}
+
+function isGreetingOnly(text: string): boolean {
+  const normalized = text.trim().toLowerCase().replace(/[!?.]+$/g, "");
+  return ["hey", "hi", "hello", "yo", "good morning", "good evening"].includes(normalized);
+}
+
+function normalizeComparableText(text: string): string {
+  return text.toLowerCase().replace(/\s+/g, " ").trim();
+}
+
+function messageFragmentsLookRelated(a: string, b: string): boolean {
+  const aa = normalizeComparableText(a);
+  const bb = normalizeComparableText(b);
+  if (!aa || !bb) return false;
+  if (aa === bb || aa.startsWith(bb) || bb.startsWith(aa)) return true;
+  const tokensA = aa.split(" ").filter(Boolean);
+  const tokensB = bb.split(" ").filter(Boolean);
+  const tokenSetA = new Set(tokensA);
+  const overlap = tokensB.filter((token) => tokenSetA.has(token)).length;
+  return overlap >= 1;
+}
+
 function classifyContextLayer(messageText: string, hasImageAttachment: boolean, hasOpenTicket: boolean): ContextClass {
   const normalized = messageText.trim().toLowerCase();
   if (!normalized && hasImageAttachment && hasOpenTicket) return "extra_info";
@@ -326,7 +384,13 @@ export async function POST(request: Request) {
     console.log("telegram-message-saved", { chatId, messageId: message.message_id, rowId: storedMessage?.id });
 
     const storedMessageRow = (storedMessage ?? null) as StoredMessageRow | null;
-    const debounceWindowStartIso = new Date(Date.now() - DEBOUNCE_WINDOW_SECONDS * 1000).toISOString();
+    const shouldDebounce = !hasImageAttachment;
+    if (shouldDebounce) {
+      console.log("debounce-wait-start", { chatId, messageId: message.message_id, windowSeconds: DEBOUNCE_WINDOW_SECONDS });
+      await sleep(DEBOUNCE_WINDOW_SECONDS * 1000);
+    }
+
+    const debounceWindowStartIso = new Date(Date.now() - DUPLICATE_WINDOW_SECONDS * 1000).toISOString();
 
     console.log("debounce-buffer-start", { chatId, messageId: message.message_id, windowSeconds: DEBOUNCE_WINDOW_SECONDS });
     const { data: recentMessagesData, error: recentMessagesError } = await supabase
@@ -335,7 +399,7 @@ export async function POST(request: Request) {
       .eq("telegram_chat_id", chatId)
       .gte("created_at", debounceWindowStartIso)
       .order("created_at", { ascending: true })
-      .limit(30);
+      .limit(40);
 
     if (recentMessagesError) {
       console.error("supabase-query-error", { table: "messages", message: recentMessagesError.message });
@@ -344,18 +408,14 @@ export async function POST(request: Request) {
 
     const recentMessages = (recentMessagesData ?? []) as StoredMessageRow[];
     const recentTextMessages = recentMessages.filter((row) => (row.message_type ?? "client") === "client" && Boolean(row.message_text?.trim()));
-    const currentCreatedAt = storedMessageRow?.created_at ? new Date(storedMessageRow.created_at).getTime() : Date.now();
-    const hasNewerTextMessage = recentTextMessages.some((row) => {
-      if (!row.created_at) return false;
-      const createdAt = new Date(row.created_at).getTime();
-      return createdAt > currentCreatedAt;
-    });
+    const latestRecentTextMessage = recentTextMessages[recentTextMessages.length - 1];
 
-    if (!hasImageAttachment && hasNewerTextMessage) {
+    if (!hasImageAttachment && latestRecentTextMessage && latestRecentTextMessage.id !== storedMessageRow?.id) {
       console.log("debounce-buffer-flush", {
         chatId,
         messageId: message.message_id,
-        action: "skip_older_fragment"
+        action: "skip_older_fragment",
+        latestRowId: latestRecentTextMessage.id
       });
       return NextResponse.json({ ok: true, saved: true, ignored: "debounce_older_fragment" });
     }
@@ -370,6 +430,34 @@ export async function POST(request: Request) {
       combinedCount: !hasImageAttachment ? recentTextMessages.length : 1,
       combinedTextLength: combinedClientMessageText.length
     });
+    console.log("debounce-final-processing", { chatId, messageId: message.message_id, finalLength: combinedClientMessageText.length });
+
+    if (!hasImageAttachment && isGreetingOnly(combinedClientMessageText)) {
+      console.log("greeting-detected", { chatId, messageId: message.message_id });
+      const greetingAckWindowStartIso = new Date(Date.now() - DEBOUNCE_WINDOW_SECONDS * 1000).toISOString();
+      const { data: recentGreetingAck } = await supabase
+        .from("bot_responses")
+        .select("id")
+        .eq("telegram_chat_id", chatId)
+        .eq("response_type", "greeting_ack")
+        .gte("created_at", greetingAckWindowStartIso)
+        .order("created_at", { ascending: false })
+        .limit(1);
+
+      if (!recentGreetingAck || recentGreetingAck.length === 0) {
+        const greetingMessage = chooseGreetingMessage();
+        const greetingMessageId = await sendTelegramMessage(botToken, chatId, greetingMessage);
+        await supabase.from("bot_responses").insert({
+          ticket_id: null,
+          telegram_chat_id: chatId,
+          telegram_message_id: greetingMessageId ?? null,
+          response_type: "greeting_ack",
+          response_text: greetingMessage
+        });
+      }
+
+      return NextResponse.json({ ok: true, saved: true, ignored: "greeting_only" });
+    }
 
     console.log("context-layer-start", { chatId, messageId: message.message_id });
     const recentTicketStartIso = new Date(Date.now() - RECENT_TICKET_WINDOW_HOURS * 60 * 60 * 1000).toISOString();
@@ -467,6 +555,26 @@ export async function POST(request: Request) {
         if (closeError) {
           console.error("supabase-update-error", { table: "tickets", message: closeError.message });
         }
+      } else if (contextClass === "correction") {
+        const { data: ticketForCorrection } = await supabase
+          .from("tickets")
+          .select("client_original_message")
+          .eq("id", latestTicket.id)
+          .single();
+        const currentOriginal = String(ticketForCorrection?.client_original_message ?? "").trim();
+        const correctionSuffix = `Correction: ${contextText}`;
+        const mergedOriginal = currentOriginal
+          ? `${currentOriginal}\n${correctionSuffix}`
+          : correctionSuffix;
+        const { error: correctionUpdateError } = await supabase
+          .from("tickets")
+          .update({ client_original_message: mergedOriginal, updated_at: new Date().toISOString() })
+          .eq("id", latestTicket.id);
+        if (correctionUpdateError) {
+          console.error("supabase-update-error", { table: "tickets", message: correctionUpdateError.message });
+        } else {
+          console.log("correction-dashboard-updated", { chatId, ticketId: latestTicket.id });
+        }
       }
 
       const { error: contextResponseError } = await supabase.from("bot_responses").insert({
@@ -478,6 +586,35 @@ export async function POST(request: Request) {
       });
       if (contextResponseError) {
         console.error("supabase-insert-error", { table: "bot_responses", message: contextResponseError.message });
+      }
+
+      if (["follow_up", "correction", "extra_info"].includes(contextClass)) {
+        const ackWindowSeconds = contextClass === "follow_up" ? DEBOUNCE_WINDOW_SECONDS : DUPLICATE_WINDOW_SECONDS;
+        const ackWindowStartIso = new Date(Date.now() - ackWindowSeconds * 1000).toISOString();
+        const responseType = `context_${contextClass}_ack`;
+        const { data: recentAck } = await supabase
+          .from("bot_responses")
+          .select("id")
+          .eq("ticket_id", latestTicket.id)
+          .eq("response_type", responseType)
+          .gte("created_at", ackWindowStartIso)
+          .order("created_at", { ascending: false })
+          .limit(1);
+
+        if (!recentAck || recentAck.length === 0) {
+          const clientAckText = chooseContextAck(contextClass);
+          const clientAckMessageId = await sendTelegramMessage(botToken, chatId, clientAckText);
+          await supabase.from("bot_responses").insert({
+            ticket_id: latestTicket.id,
+            telegram_chat_id: chatId,
+            telegram_message_id: clientAckMessageId ?? null,
+            response_type: responseType,
+            response_text: clientAckText
+          });
+          if (contextClass === "follow_up") {
+            console.log("follow-up-client-ack-sent", { chatId, ticketId: latestTicket.id, messageId: clientAckMessageId ?? null });
+          }
+        }
       }
 
       return NextResponse.json({ ok: true, saved: true, routedToTicketId: latestTicket.id, contextClass });
@@ -492,6 +629,51 @@ export async function POST(request: Request) {
 
     if (contextClass === "new_request") {
       console.log("context-new-request", { chatId, messageId: message.message_id });
+    }
+
+    const duplicateWindowStartIso = new Date(Date.now() - DUPLICATE_WINDOW_SECONDS * 1000).toISOString();
+    const { data: recentOpenTicketData, error: recentOpenTicketError } = await supabase
+      .from("tickets")
+      .select("id, status, priority, client_original_message, holding_message_id")
+      .eq("client_chat_id", chatId)
+      .gte("created_at", duplicateWindowStartIso)
+      .in("status", ["open", "new", "waiting_mark", "waiting_for_mark"])
+      .order("created_at", { ascending: false })
+      .limit(1)
+      .maybeSingle();
+
+    if (recentOpenTicketError) {
+      console.error("supabase-query-error", { table: "tickets", message: recentOpenTicketError.message });
+      throw new Error(`Supabase recent open ticket query failed: ${recentOpenTicketError.message}`);
+    }
+
+    const recentOpenTicket = recentOpenTicketData as
+      | { id: string; status: string | null; priority: string | null; client_original_message: string | null; holding_message_id: string | number | null }
+      | null;
+
+    if (
+      recentOpenTicket?.id &&
+      messageFragmentsLookRelated(String(recentOpenTicket.client_original_message ?? ""), combinedClientMessageText)
+    ) {
+      console.log("duplicate-ticket-prevented", { chatId, ticketId: recentOpenTicket.id, messageId: message.message_id });
+      const mergedMessage = normalizeComparableText(String(recentOpenTicket.client_original_message ?? "")) === normalizeComparableText(combinedClientMessageText)
+        ? String(recentOpenTicket.client_original_message ?? combinedClientMessageText)
+        : combinedClientMessageText;
+      const { error: mergeUpdateError } = await supabase
+        .from("tickets")
+        .update({
+          client_original_message: mergedMessage,
+          extracted_data: classification.extractedData,
+          internal_summary: classification.internalSummary,
+          updated_at: new Date().toISOString()
+        })
+        .eq("id", recentOpenTicket.id);
+      if (mergeUpdateError) {
+        console.error("supabase-update-error", { table: "tickets", message: mergeUpdateError.message });
+      } else {
+        console.log("debounce-merged-into-existing", { chatId, ticketId: recentOpenTicket.id });
+      }
+      return NextResponse.json({ ok: true, saved: true, mergedIntoTicketId: recentOpenTicket.id });
     }
 
     const { data: ticket, error: ticketError } = await supabase
