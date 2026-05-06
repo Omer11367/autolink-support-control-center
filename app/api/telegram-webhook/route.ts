@@ -613,6 +613,7 @@ export async function POST(request: Request) {
       }
 
       const newestTextMessage = (newestTextMessageData ?? null) as StoredMessageRow | null;
+      const newestCreatedAtMs = newestTextMessage?.created_at ? new Date(newestTextMessage.created_at).getTime() : Date.now();
       if (newestTextMessage?.id && newestTextMessage.id !== storedMessageRow?.id) {
         console.log("older-fragment-exit-no-ticket", {
           chatId,
