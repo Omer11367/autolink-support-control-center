@@ -18,6 +18,7 @@ type TelegramUser = {
 
 type TelegramMessage = {
   message_id: number;
+  date?: number;
   chat: TelegramChat;
   from?: TelegramUser;
   text?: string;
@@ -54,6 +55,33 @@ type TelegramSendResponse = {
 };
 
 const HOLDING_MESSAGE = "Hello! I'll check this now and update you shortly.";
+const DEBOUNCE_WINDOW_SECONDS = 10;
+const RECENT_TICKET_WINDOW_HOURS = 24;
+
+type ContextClass =
+  | "new_request"
+  | "follow_up"
+  | "correction"
+  | "extra_info"
+  | "close_signal"
+  | "unknown";
+
+type TicketRow = {
+  id: string;
+  status: string | null;
+  priority: string | null;
+  client_chat_id: string | number | null;
+  created_at: string | null;
+  updated_at: string | null;
+};
+
+type StoredMessageRow = {
+  id: string;
+  created_at: string | null;
+  message_text: string | null;
+  message_type: string | null;
+  telegram_message_id: number | null;
+};
 
 function firstEnv(names: string[]): string | undefined {
   for (const name of names) {
@@ -191,6 +219,45 @@ function getRuntimeEnv() {
   };
 }
 
+function isOpenTicketStatus(status: string | null | undefined): boolean {
+  const value = String(status ?? "").toLowerCase();
+  return ["open", "new", "waiting_mark", "waiting_for_mark"].includes(value);
+}
+
+function hasAnyPhrase(text: string, phrases: string[]): boolean {
+  return phrases.some((phrase) => text.includes(phrase));
+}
+
+function classifyContextLayer(messageText: string, hasImageAttachment: boolean, hasOpenTicket: boolean): ContextClass {
+  const normalized = messageText.trim().toLowerCase();
+  if (!normalized && hasImageAttachment && hasOpenTicket) return "extra_info";
+
+  const followUpPhrases = ["any update", "update?", "hello?", "??", "status?", "done?", "waiting", "wait?", "still waiting", "where are you"];
+  const correctionPhrases = ["no wait", "wrong", "sorry", "use this", "instead", "different bm", "not this", "ignore previous", "change it"];
+  const closePhrases = ["close", "cancel", "never mind", "nevermind", "resolved", "done thanks", "all good", "no need"];
+  const extraInfoPhrases = ["bm", "account", "access", "id", "login", "password", "mail", "email", "screenshot", "image", "attached", "proof", "here it is"];
+  const newRequestPhrases = [
+    "share",
+    "unshare",
+    "deposit",
+    "funds",
+    "refund",
+    "verify",
+    "request account",
+    "need account",
+    "availability",
+    "issue"
+  ];
+
+  if (hasOpenTicket && (normalized === "??" || hasAnyPhrase(normalized, followUpPhrases))) return "follow_up";
+  if (hasOpenTicket && hasAnyPhrase(normalized, correctionPhrases)) return "correction";
+  if (hasOpenTicket && hasAnyPhrase(normalized, closePhrases)) return "close_signal";
+  if (hasOpenTicket && (hasImageAttachment || hasAnyPhrase(normalized, extraInfoPhrases))) return "extra_info";
+  if (hasAnyPhrase(normalized, newRequestPhrases)) return "new_request";
+
+  return "unknown";
+}
+
 export async function GET() {
   return NextResponse.json({
     ok: true,
@@ -249,7 +316,7 @@ export async function POST(request: Request) {
         message_type: hasImageAttachment ? "client_photo" : "client",
         raw_payload: update
       })
-      .select("id")
+      .select("id, created_at, message_text, message_type, telegram_message_id")
       .single();
 
     if (messageError) {
@@ -258,12 +325,174 @@ export async function POST(request: Request) {
     }
     console.log("telegram-message-saved", { chatId, messageId: message.message_id, rowId: storedMessage?.id });
 
-    const classification = classifyIntent(clientMessageText);
+    const storedMessageRow = (storedMessage ?? null) as StoredMessageRow | null;
+    const debounceWindowStartIso = new Date(Date.now() - DEBOUNCE_WINDOW_SECONDS * 1000).toISOString();
+
+    console.log("debounce-buffer-start", { chatId, messageId: message.message_id, windowSeconds: DEBOUNCE_WINDOW_SECONDS });
+    const { data: recentMessagesData, error: recentMessagesError } = await supabase
+      .from("messages")
+      .select("id, created_at, message_text, message_type, telegram_message_id")
+      .eq("telegram_chat_id", chatId)
+      .gte("created_at", debounceWindowStartIso)
+      .order("created_at", { ascending: true })
+      .limit(30);
+
+    if (recentMessagesError) {
+      console.error("supabase-query-error", { table: "messages", message: recentMessagesError.message });
+      throw new Error(`Supabase messages query failed: ${recentMessagesError.message}`);
+    }
+
+    const recentMessages = (recentMessagesData ?? []) as StoredMessageRow[];
+    const recentTextMessages = recentMessages.filter((row) => (row.message_type ?? "client") === "client" && Boolean(row.message_text?.trim()));
+    const currentCreatedAt = storedMessageRow?.created_at ? new Date(storedMessageRow.created_at).getTime() : Date.now();
+    const hasNewerTextMessage = recentTextMessages.some((row) => {
+      if (!row.created_at) return false;
+      const createdAt = new Date(row.created_at).getTime();
+      return createdAt > currentCreatedAt;
+    });
+
+    if (!hasImageAttachment && hasNewerTextMessage) {
+      console.log("debounce-buffer-flush", {
+        chatId,
+        messageId: message.message_id,
+        action: "skip_older_fragment"
+      });
+      return NextResponse.json({ ok: true, saved: true, ignored: "debounce_older_fragment" });
+    }
+
+    const combinedClientMessageText = !hasImageAttachment && recentTextMessages.length > 1
+      ? recentTextMessages.map((row) => row.message_text?.trim() ?? "").filter(Boolean).join(" ").trim()
+      : clientMessageText;
+
+    console.log("debounce-buffer-flush", {
+      chatId,
+      messageId: message.message_id,
+      combinedCount: !hasImageAttachment ? recentTextMessages.length : 1,
+      combinedTextLength: combinedClientMessageText.length
+    });
+
+    console.log("context-layer-start", { chatId, messageId: message.message_id });
+    const recentTicketStartIso = new Date(Date.now() - RECENT_TICKET_WINDOW_HOURS * 60 * 60 * 1000).toISOString();
+    const { data: latestTicketData, error: latestTicketError } = await supabase
+      .from("tickets")
+      .select("id, status, priority, client_chat_id, created_at, updated_at")
+      .eq("client_chat_id", chatId)
+      .gte("created_at", recentTicketStartIso)
+      .order("created_at", { ascending: false })
+      .limit(1)
+      .maybeSingle();
+
+    if (latestTicketError) {
+      console.error("supabase-query-error", { table: "tickets", message: latestTicketError.message });
+      throw new Error(`Supabase tickets query failed: ${latestTicketError.message}`);
+    }
+
+    const latestTicket = (latestTicketData ?? null) as TicketRow | null;
+    const hasOpenTicket = isOpenTicketStatus(latestTicket?.status);
+    const contextClass = classifyContextLayer(combinedClientMessageText, hasImageAttachment, hasOpenTicket);
+    console.log("context-layer-result", {
+      chatId,
+      messageId: message.message_id,
+      contextClass,
+      hasOpenTicket,
+      latestTicketId: latestTicket?.id ?? null
+    });
+
+    if (latestTicket?.id && hasOpenTicket && ["follow_up", "correction", "extra_info", "close_signal"].includes(contextClass)) {
+      const contextText = combinedClientMessageText || "Image/screenshot sent by client.";
+      const contextPrefix =
+        contextClass === "follow_up"
+          ? "Follow-up from client"
+          : contextClass === "correction"
+            ? "Correction from client"
+            : contextClass === "close_signal"
+              ? "Close signal from client"
+              : "Additional info from client";
+
+      if (contextClass === "follow_up") {
+        console.log("context-follow-up", { chatId, ticketId: latestTicket.id });
+      } else if (contextClass === "correction") {
+        console.log("context-correction", { chatId, ticketId: latestTicket.id });
+      } else if (contextClass === "extra_info") {
+        console.log("context-extra-info", { chatId, ticketId: latestTicket.id });
+      } else if (contextClass === "close_signal") {
+        console.log("context-close-signal", { chatId, ticketId: latestTicket.id });
+      }
+
+      const { error: noteError } = await supabase.from("ticket_notes").insert({
+        ticket_id: latestTicket.id,
+        note_text: `${contextPrefix}: ${contextText}`
+      });
+      if (noteError) {
+        console.error("supabase-insert-error", { table: "ticket_notes", message: noteError.message });
+      }
+
+      const contextForwardMessage = `[#${latestTicket.id}] ${contextPrefix}: ${contextText}`;
+
+      let guardianMessageId: number | undefined;
+      if (hasImageAttachment) {
+        const captionForContext = `${contextForwardMessage}\n${caption || "Image/screenshot sent by client."}`;
+        const fallbackPhotoFileId = largestPhotoFileId(message.photo);
+        const fallbackDocumentFileId = hasImageDocument ? message.document?.file_id : null;
+        try {
+          guardianMessageId = await copyTelegramMessage(botToken, markGroupChatId, chatId, message.message_id, captionForContext);
+        } catch (copyError) {
+          console.error("telegram-copy-message-fallback", copyError);
+          if (fallbackPhotoFileId) {
+            guardianMessageId = await sendTelegramPhoto(botToken, markGroupChatId, fallbackPhotoFileId, captionForContext);
+          } else if (fallbackDocumentFileId) {
+            guardianMessageId = await sendTelegramDocument(botToken, markGroupChatId, fallbackDocumentFileId, captionForContext);
+          }
+        }
+      } else {
+        guardianMessageId = await sendTelegramMessage(botToken, markGroupChatId, contextForwardMessage);
+      }
+
+      if (contextClass === "follow_up" && latestTicket.priority !== "high" && latestTicket.priority !== "urgent") {
+        const { error: escalateError } = await supabase
+          .from("tickets")
+          .update({ priority: "high", updated_at: new Date().toISOString() })
+          .eq("id", latestTicket.id);
+        if (escalateError) {
+          console.error("supabase-update-error", { table: "tickets", message: escalateError.message });
+        }
+      }
+
+      if (contextClass === "close_signal") {
+        const closeAt = new Date().toISOString();
+        const { error: closeError } = await supabase
+          .from("tickets")
+          .update({ status: "closed", needs_mark: false, updated_at: closeAt, closed_at: closeAt })
+          .eq("id", latestTicket.id);
+        if (closeError) {
+          console.error("supabase-update-error", { table: "tickets", message: closeError.message });
+        }
+      }
+
+      const { error: contextResponseError } = await supabase.from("bot_responses").insert({
+        ticket_id: latestTicket.id,
+        telegram_chat_id: Number(markGroupChatId),
+        telegram_message_id: guardianMessageId ?? null,
+        response_type: `context_${contextClass}`,
+        response_text: contextForwardMessage
+      });
+      if (contextResponseError) {
+        console.error("supabase-insert-error", { table: "bot_responses", message: contextResponseError.message });
+      }
+
+      return NextResponse.json({ ok: true, saved: true, routedToTicketId: latestTicket.id, contextClass });
+    }
+
+    const classification = classifyIntent(combinedClientMessageText);
     const requiresMark = hasImageAttachment ? true : classification.requiresMark;
     const shouldReply = hasImageAttachment ? true : classification.shouldReply;
     const guardianMessage = hasImageAttachment
       ? (text ? (buildGuardianMirrorMessage(text) ?? text) : "Client sent an image/screenshot.")
-      : (buildGuardianMirrorMessage(clientMessageText) ?? clientMessageText);
+      : (buildGuardianMirrorMessage(combinedClientMessageText) ?? combinedClientMessageText);
+
+    if (contextClass === "new_request") {
+      console.log("context-new-request", { chatId, messageId: message.message_id });
+    }
 
     const { data: ticket, error: ticketError } = await supabase
       .from("tickets")
@@ -277,7 +506,7 @@ export async function POST(request: Request) {
         status: requiresMark ? "waiting_mark" : "closed",
         priority: ["deposit_funds", "refund_request", "payment_issue", "check_policy"].includes(classification.intent) ? "high" : "normal",
         needs_mark: requiresMark,
-        client_original_message: clientMessageText,
+        client_original_message: combinedClientMessageText,
         extracted_data: classification.extractedData,
         internal_summary: classification.internalSummary
       })
