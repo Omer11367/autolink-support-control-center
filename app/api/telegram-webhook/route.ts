@@ -449,6 +449,9 @@ export async function POST(request: Request) {
       throw new Error(`Supabase messages insert failed: ${messageError.message}`);
     }
     console.log("telegram-message-saved", { chatId, messageId: message.message_id, rowId: storedMessage?.id });
+    if (!hasImageAttachment) {
+      console.log("text-message-queued", { chatId, messageId: message.message_id, rowId: storedMessage?.id });
+    }
 
     const storedMessageRow = (storedMessage ?? null) as StoredMessageRow | null;
     const shouldDebounce = !hasImageAttachment;
@@ -475,24 +478,65 @@ export async function POST(request: Request) {
 
     const recentMessages = (recentMessagesData ?? []) as StoredMessageRow[];
     const recentTextMessages = recentMessages.filter((row) => (row.message_type ?? "client") === "client" && Boolean(row.message_text?.trim()));
-    const latestRecentTextMessage = recentTextMessages[recentTextMessages.length - 1];
-    if (!hasImageAttachment && recentTextMessages.length > 1) {
-      console.log("debounce-quiet-window-reset", { chatId, messageId: message.message_id, fragmentCount: recentTextMessages.length });
-    }
+    let combinedClientMessageText = clientMessageText;
 
-    if (!hasImageAttachment && latestRecentTextMessage && latestRecentTextMessage.id !== storedMessageRow?.id) {
-      console.log("debounce-exit-before-ticket", {
+    if (!hasImageAttachment) {
+      const { data: newestTextMessageData, error: newestTextMessageError } = await supabase
+        .from("messages")
+        .select("id, created_at, message_text, message_type, telegram_message_id")
+        .eq("telegram_chat_id", chatId)
+        .eq("message_type", "client")
+        .order("created_at", { ascending: false })
+        .limit(1)
+        .maybeSingle();
+
+      if (newestTextMessageError) {
+        console.error("supabase-query-error", { table: "messages", message: newestTextMessageError.message });
+        throw new Error(`Supabase newest message query failed: ${newestTextMessageError.message}`);
+      }
+
+      const newestTextMessage = (newestTextMessageData ?? null) as StoredMessageRow | null;
+      if (newestTextMessage?.id && newestTextMessage.id !== storedMessageRow?.id) {
+        console.log("older-fragment-exit-no-ticket", {
+          chatId,
+          messageId: message.message_id,
+          rowId: storedMessageRow?.id ?? null,
+          latestRowId: newestTextMessage.id
+        });
+        return NextResponse.json({ ok: true, saved: true, ignored: "older_fragment_exit_no_ticket" });
+      }
+
+      console.log("latest-burst-processing", { chatId, messageId: message.message_id, rowId: storedMessageRow?.id ?? null });
+      const newestCreatedAtMs = newestTextMessage?.created_at ? new Date(newestTextMessage.created_at).getTime() : Date.now();
+      const burstWindowStartIso = new Date(newestCreatedAtMs - DUPLICATE_WINDOW_SECONDS * 1000).toISOString();
+      const { data: burstMessagesData, error: burstMessagesError } = await supabase
+        .from("messages")
+        .select("id, created_at, message_text, message_type, telegram_message_id")
+        .eq("telegram_chat_id", chatId)
+        .eq("message_type", "client")
+        .gte("created_at", burstWindowStartIso)
+        .lte("created_at", new Date(newestCreatedAtMs).toISOString())
+        .order("created_at", { ascending: true })
+        .limit(50);
+
+      if (burstMessagesError) {
+        console.error("supabase-query-error", { table: "messages", message: burstMessagesError.message });
+        throw new Error(`Supabase burst messages query failed: ${burstMessagesError.message}`);
+      }
+
+      const burstMessages = (burstMessagesData ?? []) as StoredMessageRow[];
+      if (burstMessages.length > 1) {
+        console.log("debounce-quiet-window-reset", { chatId, messageId: message.message_id, fragmentCount: burstMessages.length });
+      }
+
+      combinedClientMessageText = burstMessages.map((row) => row.message_text?.trim() ?? "").filter(Boolean).join(" ").trim() || clientMessageText;
+      console.log("combined-burst-text", {
         chatId,
         messageId: message.message_id,
-        action: "skip_older_fragment",
-        latestRowId: latestRecentTextMessage.id
+        fragmentCount: burstMessages.length,
+        text: combinedClientMessageText
       });
-      return NextResponse.json({ ok: true, saved: true, ignored: "debounce_older_fragment" });
     }
-
-    const combinedClientMessageText = !hasImageAttachment && recentTextMessages.length > 1
-      ? recentTextMessages.map((row) => row.message_text?.trim() ?? "").filter(Boolean).join(" ").trim()
-      : clientMessageText;
 
     console.log("debounce-buffer-flush", {
       chatId,
@@ -820,6 +864,31 @@ export async function POST(request: Request) {
       return NextResponse.json({ ok: true, saved: true, mergedIntoTicketId: recentOpenTicket.id });
     }
 
+    if (!hasImageAttachment) {
+      const { data: finalNewestTextData, error: finalNewestTextError } = await supabase
+        .from("messages")
+        .select("id")
+        .eq("telegram_chat_id", chatId)
+        .eq("message_type", "client")
+        .order("created_at", { ascending: false })
+        .limit(1)
+        .maybeSingle();
+      if (finalNewestTextError) {
+        console.error("supabase-query-error", { table: "messages", message: finalNewestTextError.message });
+        throw new Error(`Supabase final latest check failed: ${finalNewestTextError.message}`);
+      }
+      if (finalNewestTextData?.id && finalNewestTextData.id !== storedMessageRow?.id) {
+        console.log("older-fragment-exit-no-ticket", {
+          chatId,
+          messageId: message.message_id,
+          rowId: storedMessageRow?.id ?? null,
+          latestRowId: finalNewestTextData.id,
+          stage: "before_ticket_insert"
+        });
+        return NextResponse.json({ ok: true, saved: true, ignored: "older_fragment_before_ticket_insert" });
+      }
+    }
+
     const { data: ticket, error: ticketError } = await supabase
       .from("tickets")
       .insert({
@@ -844,6 +913,13 @@ export async function POST(request: Request) {
       throw new Error(`Supabase tickets insert failed: ${ticketError.message}`);
     }
     console.log("telegram-ticket-created", { chatId, messageId: message.message_id, ticketId: ticket?.id });
+    if (!hasImageAttachment) {
+      console.log("single-ticket-created-from-burst", {
+        chatId,
+        messageId: message.message_id,
+        ticketId: ticket?.id ?? null
+      });
+    }
 
     if (!requiresMark || !shouldReply) {
       return NextResponse.json({ ok: true, saved: true, ignored: "no_action", ticketId: ticket?.id ?? null });
