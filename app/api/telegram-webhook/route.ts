@@ -57,6 +57,7 @@ type TelegramSendResponse = {
 const HOLDING_MESSAGE = "Hello! I'll check this now and update you shortly.";
 const DEBOUNCE_WINDOW_SECONDS = 10;
 const DUPLICATE_WINDOW_SECONDS = 15;
+const LOGICAL_GROUP_WINDOW_SECONDS = 60;
 const RECENT_TICKET_WINDOW_HOURS = 24;
 
 type ContextClass =
@@ -87,6 +88,15 @@ type StoredMessageRow = {
   message_type: string | null;
   telegram_message_id: number | null;
 };
+
+type TicketGroupingClass =
+  | "standalone_request"
+  | "continuation_fragment"
+  | "amount_fragment"
+  | "currency_fragment"
+  | "smalltalk"
+  | "follow_up"
+  | "correction";
 
 function sleep(ms: number) {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -272,6 +282,44 @@ function isGreetingOnly(text: string): boolean {
 
 function normalizeComparableText(text: string): string {
   return text.toLowerCase().replace(/\s+/g, " ").trim();
+}
+
+function classifyTicketGrouping(text: string): TicketGroupingClass {
+  const normalized = normalizeComparableText(text).replace(/[!?.,]+$/g, "");
+  const smalltalkKind = classifyIncomingTextKind(normalized);
+  if (smalltalkKind !== "support_request") return "smalltalk";
+
+  const followUpPhrases = ["any update", "update?", "status?", "done?", "waiting", "wait?"];
+  if (hasAnyPhrase(normalized, followUpPhrases)) return "follow_up";
+
+  const correctionPhrases = ["no wait", "actually", "wrong", "instead", "changed", "i see now", "please check", "same one", "for this"];
+  if (hasAnyPhrase(normalized, correctionPhrases)) return "correction";
+
+  if (/^\$|^usd$|^usdt$|^dollars?$/.test(normalized)) return "currency_fragment";
+  if (/^(?:\d+(?:[.,]\d+)?(?:k)?|\d+(?:[.,]\d+)?\s*(?:usd|usdt|\$|dollars?))$/i.test(normalized)) return "amount_fragment";
+
+  const continuationPhrases = ["and one more", "one more", "also", "plus", "check this", "please check", "and", "more", "another"];
+  if (hasAnyPhrase(normalized, continuationPhrases) || normalized.split(" ").length <= 3) return "continuation_fragment";
+
+  return "standalone_request";
+}
+
+function isLogicalGroupReady(text: string, fragmentCount: number): boolean {
+  const normalized = normalizeComparableText(text);
+  const requestSignals = ["send", "sent", "share", "unshare", "deposit", "funds", "refund", "verify", "request", "need", "availability", "issue", "check"];
+  if (hasAnyPhrase(normalized, requestSignals)) return true;
+  if (/\$|usd|usdt|dollars?/i.test(normalized) && /\d/.test(normalized)) return true;
+  return fragmentCount >= 3;
+}
+
+function pickSafeHoldingMessage(defaultMessage: string): string {
+  if (!/^received/i.test(defaultMessage.trim())) return defaultMessage;
+  const safeVariants = [
+    "Sure, I’ll check this and get back to you shortly.",
+    "Got it, I’ll check with the team and update you.",
+    "I’ll check this now and update you shortly."
+  ];
+  return safeVariants[Math.floor(Math.random() * safeVariants.length)] ?? safeVariants[0];
 }
 
 type TextKind = "greeting_only" | "thanks_only" | "close_only" | "support_request";
@@ -479,6 +527,7 @@ export async function POST(request: Request) {
     const recentMessages = (recentMessagesData ?? []) as StoredMessageRow[];
     const recentTextMessages = recentMessages.filter((row) => (row.message_type ?? "client") === "client" && Boolean(row.message_text?.trim()));
     let combinedClientMessageText = clientMessageText;
+    let burstMessages: StoredMessageRow[] = [];
 
     if (!hasImageAttachment) {
       const { data: newestTextMessageData, error: newestTextMessageError } = await supabase
@@ -508,7 +557,16 @@ export async function POST(request: Request) {
 
       console.log("latest-burst-processing", { chatId, messageId: message.message_id, rowId: storedMessageRow?.id ?? null });
       const newestCreatedAtMs = newestTextMessage?.created_at ? new Date(newestTextMessage.created_at).getTime() : Date.now();
-      const burstWindowStartIso = new Date(newestCreatedAtMs - DUPLICATE_WINDOW_SECONDS * 1000).toISOString();
+      const logicalWindowStartMs = newestCreatedAtMs - LOGICAL_GROUP_WINDOW_SECONDS * 1000;
+      const { data: latestCreatedTicketData } = await supabase
+        .from("tickets")
+        .select("created_at")
+        .eq("client_chat_id", chatId)
+        .order("created_at", { ascending: false })
+        .limit(1)
+        .maybeSingle();
+      const latestCreatedTicketMs = latestCreatedTicketData?.created_at ? new Date(latestCreatedTicketData.created_at).getTime() : 0;
+      const burstWindowStartIso = new Date(Math.max(logicalWindowStartMs, latestCreatedTicketMs || 0)).toISOString();
       const { data: burstMessagesData, error: burstMessagesError } = await supabase
         .from("messages")
         .select("id, created_at, message_text, message_type, telegram_message_id")
@@ -524,7 +582,7 @@ export async function POST(request: Request) {
         throw new Error(`Supabase burst messages query failed: ${burstMessagesError.message}`);
       }
 
-      const burstMessages = (burstMessagesData ?? []) as StoredMessageRow[];
+      burstMessages = (burstMessagesData ?? []) as StoredMessageRow[];
       if (burstMessages.length > 1) {
         console.log("debounce-quiet-window-reset", { chatId, messageId: message.message_id, fragmentCount: burstMessages.length });
       }
@@ -545,6 +603,33 @@ export async function POST(request: Request) {
       combinedTextLength: combinedClientMessageText.length
     });
     console.log("debounce-final-single-processing", { chatId, messageId: message.message_id, finalLength: combinedClientMessageText.length });
+
+    if (!hasImageAttachment) {
+      const groupingClass = classifyTicketGrouping(combinedClientMessageText);
+      if (["continuation_fragment", "amount_fragment", "currency_fragment"].includes(groupingClass)) {
+        console.log("ticket-fragment-detected", {
+          chatId,
+          messageId: message.message_id,
+          groupingClass,
+          fragmentCount: burstMessages.length
+        });
+        if (!isLogicalGroupReady(combinedClientMessageText, burstMessages.length)) {
+          console.log("prevented-fragment-ticket", {
+            chatId,
+            messageId: message.message_id,
+            groupingClass,
+            fragmentCount: burstMessages.length
+          });
+          return NextResponse.json({ ok: true, saved: true, ignored: "fragment_waiting_for_group_completion" });
+        }
+        console.log("ticket-fragment-merged", {
+          chatId,
+          messageId: message.message_id,
+          groupingClass,
+          mergedTextLength: combinedClientMessageText.length
+        });
+      }
+    }
 
     if (!hasImageAttachment) {
       const textKind = classifyIncomingTextKind(combinedClientMessageText);
@@ -913,6 +998,7 @@ export async function POST(request: Request) {
       throw new Error(`Supabase tickets insert failed: ${ticketError.message}`);
     }
     console.log("telegram-ticket-created", { chatId, messageId: message.message_id, ticketId: ticket?.id });
+    console.log("logical-request-created", { chatId, messageId: message.message_id, ticketId: ticket?.id ?? null });
     if (!hasImageAttachment) {
       console.log("single-ticket-created-from-burst", {
         chatId,
@@ -925,8 +1011,14 @@ export async function POST(request: Request) {
       return NextResponse.json({ ok: true, saved: true, ignored: "no_action", ticketId: ticket?.id ?? null });
     }
 
-    const holdingMessage = classification.holdingMessage || HOLDING_MESSAGE;
+    const holdingMessage = pickSafeHoldingMessage(classification.holdingMessage || HOLDING_MESSAGE);
     const holdingMessageId = await sendTelegramMessage(botToken, chatId, holdingMessage);
+    console.log("holding-sent-once-for-group", {
+      chatId,
+      messageId: message.message_id,
+      ticketId: ticket?.id ?? null,
+      holdingMessageId: holdingMessageId ?? null
+    });
     let guardianMessageId: number | undefined;
 
     if (hasImageAttachment) {
