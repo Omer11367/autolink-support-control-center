@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { createClient } from "@supabase/supabase-js";
 import { buildGuardianMirrorMessage } from "@/lib/guardian-mirror";
 import { classifyIntent } from "@/lib/intent-classifier";
+import { writeClientRequestRowToGoogleSheet } from "@/lib/google-sheets";
 
 type TelegramChat = {
   id: number;
@@ -1105,6 +1106,25 @@ export async function POST(request: Request) {
         classification: groupedClassification
       });
       console.log("conversation-burst-ticket-created", { chatId, messageId: message.message_id, ticketId: createdTicket.id, intent: intent || groupedClassification.intent });
+
+      try {
+        console.log("google-sheets-write-start", { chatId, ticketId: createdTicket.id, intent: intent || groupedClassification.intent });
+        await writeClientRequestRowToGoogleSheet({
+          telegramGroup: message.chat.title?.trim() || String(chatId),
+          username: message.from?.username?.trim() || "",
+          originalMessage: groupedText,
+          parsedMessage: groupedClassification.internalSummary || groupedText,
+          intent: intent || groupedClassification.intent,
+          status: "Pending"
+        });
+        console.log("google-sheets-write-success", { chatId, ticketId: createdTicket.id });
+      } catch (error) {
+        console.log("google-sheets-write-failed", {
+          chatId,
+          ticketId: createdTicket.id,
+          error: error instanceof Error ? error.message : "Google Sheets write failed."
+        });
+      }
     }
 
     if (createdTickets.length === 0) {
