@@ -289,6 +289,25 @@ function classifyTicketGrouping(text: string): TicketGroupingClass {
   const smalltalkKind = classifyIncomingTextKind(normalized);
   if (smalltalkKind !== "support_request") return "smalltalk";
 
+  const newActionSignals = [
+    "send",
+    "sent",
+    "share account",
+    "share",
+    "unshare",
+    "bm",
+    "add account",
+    "verify",
+    "refund",
+    "issue",
+    "availability",
+    "need",
+    "request account",
+    "check account status",
+    "status check"
+  ];
+  if (hasAnyPhrase(normalized, newActionSignals)) return "standalone_request";
+
   const followUpPhrases = ["any update", "update?", "status?", "done?", "waiting", "wait?"];
   if (hasAnyPhrase(normalized, followUpPhrases)) return "follow_up";
 
@@ -302,6 +321,60 @@ function classifyTicketGrouping(text: string): TicketGroupingClass {
   if (hasAnyPhrase(normalized, continuationPhrases) || normalized.split(" ").length <= 3) return "continuation_fragment";
 
   return "standalone_request";
+}
+
+function isClearNewActionRequest(text: string): boolean {
+  const normalized = normalizeComparableText(text);
+  const signals = [
+    "send",
+    "sent",
+    "share",
+    "unshare",
+    "bm access",
+    "add account",
+    "verification",
+    "verify",
+    "refund",
+    "account issue",
+    "issue",
+    "availability",
+    "request account",
+    "need account",
+    "need ",
+    "check account status",
+    "policy",
+    "check this deposit",
+    "please check"
+  ];
+  return hasAnyPhrase(normalized, signals);
+}
+
+function isCorrectionMessage(text: string): boolean {
+  const normalized = normalizeComparableText(text);
+  const phrases = [
+    "no wait",
+    "i meant",
+    "wrong bm",
+    "not this",
+    "actually",
+    "replace it",
+    "instead use",
+    "i made a mistake",
+    "only",
+    "approved",
+    "use this one",
+    "not 123",
+    "use 456",
+    "wrong",
+    "changed"
+  ];
+  return hasAnyPhrase(normalized, phrases);
+}
+
+function isFollowUpMessage(text: string): boolean {
+  const normalized = normalizeComparableText(text);
+  const phrases = ["any update", "status?", "done?", "hello??", "hello?", "waiting?", "update?"];
+  return normalized === "??" || hasAnyPhrase(normalized, phrases);
 }
 
 function isLogicalGroupReady(text: string, fragmentCount: number): boolean {
@@ -387,46 +460,12 @@ function classifyContextLayer(messageText: string, hasImageAttachment: boolean, 
   const normalized = messageText.trim().toLowerCase();
   if (!normalized && hasImageAttachment && hasOpenTicket) return "extra_info";
 
-  const followUpPhrases = ["any update", "update?", "status?", "done?", "waiting", "wait?", "still waiting", "where are you", "hello??", "hello?"];
-  const correctionPhrases = [
-    "no wait",
-    "actually",
-    "wrong",
-    "not ",
-    "instead",
-    "changed",
-    "only approved",
-    "approved",
-    "i see now",
-    "please check",
-    "same one",
-    "this one",
-    "for this",
-    "use this",
-    "not this",
-    "ignore previous",
-    "change it"
-  ];
   const closePhrases = ["close", "cancel", "never mind", "nevermind", "resolved", "done thanks", "all good", "no need"];
-  const extraInfoPhrases = ["bm", "account", "access", "id", "login", "password", "mail", "email", "screenshot", "image", "attached", "proof", "here it is"];
-  const newRequestPhrases = [
-    "share",
-    "unshare",
-    "deposit",
-    "funds",
-    "refund",
-    "verify",
-    "request account",
-    "need account",
-    "availability",
-    "issue"
-  ];
-
-  if (hasOpenTicket && (normalized === "??" || hasAnyPhrase(normalized, followUpPhrases))) return "follow_up";
-  if (hasOpenTicket && hasAnyPhrase(normalized, correctionPhrases)) return "correction";
+  if (hasOpenTicket && isFollowUpMessage(normalized)) return "follow_up";
+  if (hasOpenTicket && isCorrectionMessage(normalized)) return "correction";
   if (hasOpenTicket && hasAnyPhrase(normalized, closePhrases)) return "close_signal";
-  if (hasOpenTicket && (hasImageAttachment || hasAnyPhrase(normalized, extraInfoPhrases))) return "extra_info";
-  if (hasAnyPhrase(normalized, newRequestPhrases)) return "new_request";
+  if (isClearNewActionRequest(normalized)) return "new_request";
+  if (hasOpenTicket && hasImageAttachment) return "extra_info";
 
   return "unknown";
 }
@@ -528,6 +567,7 @@ export async function POST(request: Request) {
     const recentTextMessages = recentMessages.filter((row) => (row.message_type ?? "client") === "client" && Boolean(row.message_text?.trim()));
     let combinedClientMessageText = clientMessageText;
     let burstMessages: StoredMessageRow[] = [];
+    let groupedFromFragments = false;
 
     if (!hasImageAttachment) {
       const { data: newestTextMessageData, error: newestTextMessageError } = await supabase
@@ -628,6 +668,7 @@ export async function POST(request: Request) {
           groupingClass,
           mergedTextLength: combinedClientMessageText.length
         });
+        groupedFromFragments = true;
       }
     }
 
@@ -713,6 +754,13 @@ export async function POST(request: Request) {
     const latestTicket = (latestTicketData ?? null) as TicketRow | null;
     const hasOpenTicket = isOpenTicketStatus(latestTicket?.status);
     const contextClass = classifyContextLayer(combinedClientMessageText, hasImageAttachment, hasOpenTicket);
+    if (hasOpenTicket && contextClass === "new_request") {
+      console.log("smart-prevent-overlink", {
+        chatId,
+        messageId: message.message_id,
+        latestTicketId: latestTicket?.id ?? null
+      });
+    }
     console.log("context-layer-result", {
       chatId,
       messageId: message.message_id,
@@ -750,29 +798,16 @@ export async function POST(request: Request) {
         console.error("supabase-insert-error", { table: "ticket_notes", message: noteError.message });
       }
 
-      const clientLabel = message.chat.title?.trim() || message.from?.username || String(chatId);
-      const relatedRequest = String(latestTicket.client_original_message ?? "").trim() || "N/A";
-      const ticketLabel = latestTicket.ticket_code || latestTicket.id;
-      const statusLabel = latestTicket.status ?? "unknown";
       const contextForwardMessage = contextClass === "follow_up"
-        ? [
-            "FOLLOW-UP FROM CLIENT",
-            `Client asks: ${contextText}`,
-            `Related request: ${relatedRequest}`,
-            `Ticket: ${ticketLabel}`,
-            `Status: ${statusLabel}`,
-            `Client: ${clientLabel}`
-          ].join("\n")
+        ? `FOLLOW-UP FROM CLIENT:\n${contextText}`
         : contextClass === "correction"
-          ? [
-              "CORRECTION / UPDATE FROM CLIENT",
-              `Client says: ${contextText}`,
-              `Related request: ${relatedRequest}`,
-              `Ticket: ${ticketLabel}`,
-              `Status: ${statusLabel}`,
-              `Client: ${clientLabel}`
-            ].join("\n")
-          : `[#${latestTicket.id}] ${contextPrefix}: ${contextText}`;
+          ? `CORRECTION FROM CLIENT:\n${contextText}`
+          : `ADDITIONAL INFO FROM CLIENT:\n${contextText}`;
+      console.log("mark-message-private-safe", {
+        chatId,
+        messageId: message.message_id,
+        contextClass
+      });
 
       let guardianMessageId: number | undefined;
       if (hasImageAttachment) {
@@ -794,6 +829,7 @@ export async function POST(request: Request) {
       }
       if (contextClass === "follow_up") {
         console.log("follow-up-with-ticket-context", { chatId, ticketId: latestTicket.id, ticketCode: latestTicket.ticket_code ?? null });
+        console.log("smart-follow-up-linked", { chatId, ticketId: latestTicket.id });
       }
 
       if (contextClass === "follow_up" && latestTicket.priority !== "high" && latestTicket.priority !== "urgent") {
@@ -836,6 +872,7 @@ export async function POST(request: Request) {
           console.log("correction-dashboard-updated", { chatId, ticketId: latestTicket.id });
           console.log("dashboard-history-appended", { chatId, ticketId: latestTicket.id, updateType: "correction" });
           console.log("correction-linked-to-existing-ticket", { chatId, ticketId: latestTicket.id, ticketCode: latestTicket.ticket_code ?? null });
+          console.log("smart-correction-linked", { chatId, ticketId: latestTicket.id });
         }
       } else if (contextClass === "extra_info" && hasImageAttachment) {
         const imageNote = "Image/screenshot attached by client.";
@@ -898,7 +935,16 @@ export async function POST(request: Request) {
     const shouldReply = hasImageAttachment ? true : classification.shouldReply;
     const guardianMessage = hasImageAttachment
       ? (text ? (buildGuardianMirrorMessage(text) ?? text) : "Client sent an image/screenshot.")
-      : (buildGuardianMirrorMessage(combinedClientMessageText) ?? combinedClientMessageText);
+      : ((groupedFromFragments || burstMessages.length > 1)
+        ? `GROUPED REQUEST:\n${combinedClientMessageText}`
+        : `NEW REQUEST:\n${combinedClientMessageText}`);
+    if (!hasImageAttachment) {
+      console.log("mark-message-private-safe", {
+        chatId,
+        messageId: message.message_id,
+        grouped: groupedFromFragments || burstMessages.length > 1
+      });
+    }
 
     if (contextClass === "new_request") {
       console.log("context-new-request", { chatId, messageId: message.message_id });
@@ -999,6 +1045,7 @@ export async function POST(request: Request) {
     }
     console.log("telegram-ticket-created", { chatId, messageId: message.message_id, ticketId: ticket?.id });
     console.log("logical-request-created", { chatId, messageId: message.message_id, ticketId: ticket?.id ?? null });
+    console.log("smart-new-ticket", { chatId, messageId: message.message_id, ticketId: ticket?.id ?? null });
     if (!hasImageAttachment) {
       console.log("single-ticket-created-from-burst", {
         chatId,
