@@ -443,6 +443,8 @@ function classifyIncomingTextKind(text: string): TextKind {
   const supportSignals = [
     "share",
     "unshare",
+    "account",
+    "bm",
     "deposit",
     "funds",
     "refund",
@@ -457,6 +459,7 @@ function classifyIncomingTextKind(text: string): TextKind {
     "help",
     "can you",
     "please",
+    "send",
     "sent",
     "$",
     "usd"
@@ -564,7 +567,7 @@ export async function POST(request: Request) {
     console.log("telegram-message-saved", { chatId, messageId: message.message_id, rowId: storedMessage?.id });
     if (!hasImageAttachment) {
       console.log("text-message-queued", { chatId, messageId: message.message_id, rowId: storedMessage?.id });
-      await sendTelegramMessage(botToken, markGroupChatId, `NEW REQUEST:\n${clientMessageText}`);
+      await sendTelegramMessage(botToken, markGroupChatId, clientMessageText);
       console.log("conversation-burst-message-forwarded", { chatId, messageId: message.message_id });
     }
 
