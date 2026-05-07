@@ -20,7 +20,7 @@ type SheetAction = {
   amount?: string;
 };
 
-const CATEGORY_ORDER = ["Share", "Unshare", "Deposits", "Payment Issues", "General"] as const;
+const CATEGORY_ORDER = ["Share", "Unshare", "Deposits", "Payment Issues", "Verification", "Account Issues", "General"] as const;
 const CLIENT_BATCH_REPLY = "Understood, I’ll update you once I have confirmation.";
 
 function firstEnv(names: string[]): string | undefined {
@@ -42,7 +42,9 @@ function mapIntentToCategory(intent: string | null | undefined): typeof CATEGORY
   if (["share_ad_account", "transfer_ad_account"].includes(normalized)) return "Share";
   if (["unshare_ad_account"].includes(normalized)) return "Unshare";
   if (["deposit_funds"].includes(normalized)) return "Deposits";
-  if (["payment_issue"].includes(normalized)) return "Payment Issues";
+  if (["payment_issue", "refund_request"].includes(normalized)) return "Payment Issues";
+  if (["verify_account"].includes(normalized)) return "Verification";
+  if (["check_account_status", "request_data_banned_accounts", "check_policy"].includes(normalized)) return "Account Issues";
   return "General";
 }
 
@@ -70,6 +72,12 @@ function extractAmount(text: string): string | null {
   return match?.[0] ? compactText(match[0]).replace(/\s+/g, "") : null;
 }
 
+function extractEntityAfter(text: string, labels: string[]): string | null {
+  const labelPattern = labels.map((label) => label.replace(/\s+/g, "\\s+")).join("|");
+  const match = text.match(new RegExp(`\\b(?:${labelPattern})\\b\\s*[:#-]?\\s*([A-Za-z0-9_-]+)`, "i"));
+  return match?.[1] ?? null;
+}
+
 function cleanTaskText(ticket: BatchTicket): string {
   const category = mapIntentToCategory(ticket.intent);
   const original = compactText(ticket.client_original_message ?? "");
@@ -77,17 +85,20 @@ function cleanTaskText(ticket: BatchTicket): string {
   const shareAction = actions.find((action) => action.type === "share_account");
   const unshareAction = actions.find((action) => action.type === "unshare_account");
   const paymentAction = actions.find((action) => action.type === "payment_check");
+  const verifyAction = actions.find((action) => action.type === "verify_account");
   const accountStatusAction = actions.find((action) => action.type === "account_status_check");
 
   if (category === "Share") {
-    const account = firstAccount(shareAction);
-    if (account && shareAction?.bm) return `share account ${account} to BM ${shareAction.bm}`;
+    const account = firstAccount(shareAction) ?? extractEntityAfter(original, ["account", "accounts", "acc", "ad account", "ad accounts"]);
+    const bm = shareAction?.bm ?? extractEntityAfter(original, ["bm", "business manager"]);
+    if (account && bm) return `share account ${account} to BM ${bm}`;
     if (account) return `share account ${account}`;
   }
 
   if (category === "Unshare") {
-    const account = firstAccount(unshareAction);
-    if (account && unshareAction?.bm) return `unshare account ${account} from BM ${unshareAction.bm}`;
+    const account = firstAccount(unshareAction) ?? extractEntityAfter(original, ["account", "accounts", "acc", "ad account", "ad accounts"]);
+    const bm = unshareAction?.bm ?? extractEntityAfter(original, ["bm", "business manager"]);
+    if (account && bm) return `unshare account ${account} from BM ${bm}`;
     if (account) return `unshare account ${account}`;
   }
 
@@ -97,8 +108,19 @@ function cleanTaskText(ticket: BatchTicket): string {
   }
 
   if (category === "Payment Issues") {
-    const account = firstAccount(accountStatusAction);
+    const account = firstAccount(accountStatusAction) ?? extractEntityAfter(original, ["account", "accounts", "acc", "ad account", "ad accounts"]);
     if (account) return `payment issue on account ${account}`;
+  }
+
+  if (category === "Verification") {
+    const account = firstAccount(verifyAction) ?? extractEntityAfter(original, ["account", "accounts", "acc", "ad account", "ad accounts"]);
+    if (account) return `verify account ${account}`;
+  }
+
+  if (category === "Account Issues") {
+    const account = firstAccount(accountStatusAction) ?? extractEntityAfter(original, ["account", "accounts", "acc", "ad account", "ad accounts"]);
+    if (account) return `account issue on account ${account}`;
+    return original || "account disabled / restricted";
   }
 
   return original || "general support request";
@@ -121,7 +143,7 @@ function buildMarkSummary(tickets: BatchTicket[]): string {
     })
     .filter(Boolean);
 
-  return ["📌 NEW REQUESTS BATCH", ...sections].join("\n\n");
+  return ["NEW REQUESTS BATCH", ...sections].join("\n\n");
 }
 
 async function handleBatch(request: Request) {
@@ -130,7 +152,7 @@ async function handleBatch(request: Request) {
     return NextResponse.json({ ok: false, error: "Unauthorized" }, { status: 401 });
   }
 
-  console.log("batch-start");
+  console.log("mark-batch-start");
 
   requireEnv("TELEGRAM_BOT_TOKEN", ["TELEGRAM_BOT_TOKEN"]);
   const markGroupChatId = requireEnv("MARK_GROUP_CHAT_ID or MARK_INTERNAL_CHAT_ID", ["MARK_GROUP_CHAT_ID", "MARK_INTERNAL_CHAT_ID"]);
@@ -156,21 +178,18 @@ async function handleBatch(request: Request) {
   if (error) throw new Error(`Supabase tickets batch query failed: ${error.message}`);
 
   const tickets = (data ?? []) as BatchTicket[];
-  console.log("batch-found-requests", { count: tickets.length });
+  console.log("mark-batch-found-requests", { count: tickets.length });
 
   if (tickets.length === 0) {
-    console.log("batch-no-requests");
     console.log("mark-batch-no-requests");
     return NextResponse.json({ ok: true, count: 0 });
   }
 
-  console.log("mark-batch-ready", { count: tickets.length });
   const markSummary = buildMarkSummary(tickets);
   const markSendResult = await maybeSendTelegramMessage({ chatId: markGroupChatId, text: markSummary });
   if (!markSendResult.sent || !markSendResult.telegramMessageId) {
     throw new Error(markSendResult.reason ?? "Mark batch summary was not sent.");
   }
-  console.log("batch-mark-summary-sent", { count: tickets.length, telegramMessageId: markSendResult.telegramMessageId });
   console.log("mark-batch-sent", { count: tickets.length, telegramMessageId: markSendResult.telegramMessageId });
 
   await supabase.from("bot_responses").insert({
@@ -228,7 +247,7 @@ async function handleBatch(request: Request) {
       continue;
     }
 
-    console.log("batch-request-marked-processed", { ticketId: ticket.id });
+    console.log("mark-batch-request-marked-sent", { ticketId: ticket.id });
   }
 
   return NextResponse.json({ ok: true, count: tickets.length, clientGroups: clientReplyCount });

@@ -27,23 +27,23 @@ const SHEET_HEADERS = [
 const STATUS_OPTIONS = ["Pending", "In Progress", "Waiting Client", "Completed", "Rejected"];
 
 const CATEGORY_COLORS: Record<string, { red: number; green: number; blue: number }> = {
-  Deposits: { red: 0.22, green: 0.56, blue: 0.24 },
-  "Payment Issues": { red: 0.78, green: 0.22, blue: 0.19 },
   Share: { red: 0.18, green: 0.42, blue: 0.78 },
   Unshare: { red: 0.92, green: 0.55, blue: 0.18 },
+  Deposits: { red: 0.22, green: 0.56, blue: 0.24 },
+  "Payment Issues": { red: 0.78, green: 0.22, blue: 0.19 },
   Verification: { red: 0.49, green: 0.28, blue: 0.74 },
-  General: { red: 0.42, green: 0.45, blue: 0.50 },
-  "Account Issues": { red: 0.42, green: 0.45, blue: 0.50 }
+  "Account Issues": { red: 0.42, green: 0.45, blue: 0.50 },
+  General: { red: 0.35, green: 0.39, blue: 0.45 }
 };
 
 const CATEGORY_PREFIXES: Record<string, string> = {
-  Deposits: "D",
   Share: "S",
   Unshare: "U",
+  Deposits: "D",
   "Payment Issues": "P",
   Verification: "V",
-  General: "G",
-  "Account Issues": "G"
+  "Account Issues": "A",
+  General: "G"
 };
 
 function mapIntentToCategory(intent: string): string {
@@ -51,10 +51,10 @@ function mapIntentToCategory(intent: string): string {
   if (["share_ad_account", "transfer_ad_account"].includes(normalized)) return "Share";
   if (["unshare_ad_account"].includes(normalized)) return "Unshare";
   if (["deposit_funds"].includes(normalized)) return "Deposits";
-  if (["payment_issue"].includes(normalized)) return "Payment Issues";
+  if (["payment_issue", "refund_request"].includes(normalized)) return "Payment Issues";
   if (["verify_account"].includes(normalized)) return "Verification";
-  if (["check_account_status", "request_data_banned_accounts"].includes(normalized)) return "Account Issues";
-  if (["request_accounts", "check_availability", "refund_request", "check_policy", "general_support"].includes(normalized)) return "General";
+  if (["check_account_status", "request_data_banned_accounts", "check_policy"].includes(normalized)) return "Account Issues";
+  if (["request_accounts", "check_availability", "get_spend_report", "general_support", "no_action"].includes(normalized)) return "General";
   return "General";
 }
 
@@ -184,7 +184,6 @@ async function ensureSheetTabReady(
   let sheet = (meta.data.sheets ?? []).find((item) => item.properties?.title === tabName);
 
   if (!sheet) {
-    console.log("google-sheets-tab-create-start", { spreadsheetId, tabName });
     const created = await sheets.spreadsheets.batchUpdate({
       spreadsheetId,
       requestBody: {
@@ -201,6 +200,7 @@ async function ensureSheetTabReady(
     });
     const sheetId = created.data.replies?.[0]?.addSheet?.properties?.sheetId;
     sheet = { properties: { sheetId, title: tabName } };
+    console.log("sheets-tab-created", { tabName });
   }
 
   const sheetId = sheet.properties?.sheetId;
@@ -376,7 +376,7 @@ export async function writeClientRequestRowToGoogleSheet(input: WriteClientReque
     console.log("google-sheets-no-client-map", { telegramGroup: input.telegramGroup });
     return;
   }
-  console.log("google-sheets-spreadsheet-found", { telegramGroup: input.telegramGroup, spreadsheetId });
+  console.log("google-sheets-spreadsheet-found", { telegramGroup: input.telegramGroup });
 
   try {
     const auth = new google.auth.GoogleAuth({
@@ -391,6 +391,7 @@ export async function writeClientRequestRowToGoogleSheet(input: WriteClientReque
     console.log("google-sheets-client-created", { telegramGroup: input.telegramGroup });
 
     const category = mapIntentToCategory(input.intent);
+    console.log("sheets-category-selected", { category, intent: input.intent });
     await ensureSheetTabReady(sheets, spreadsheetId, category);
 
     const now = input.now ?? new Date();
@@ -413,14 +414,15 @@ export async function writeClientRequestRowToGoogleSheet(input: WriteClientReque
       ""
     ];
 
-    console.log("google-sheets-row-write-start", { spreadsheetId, tab: category });
+    console.log("google-sheets-row-write-start", { tab: category });
     await sheets.spreadsheets.values.append({
       spreadsheetId,
       range: `${quoteSheetName(category)}!A:J`,
       valueInputOption: "RAW",
       requestBody: { values: [row] }
     });
-    console.log("google-sheets-row-write-success", { spreadsheetId, tab: category });
+    console.log("google-sheets-row-write-success", { tab: category });
+    console.log("sheets-row-written", { tab: category, ticketId });
   } catch (error) {
     console.log("google-sheets-row-write-failed", {
       stage: "append",

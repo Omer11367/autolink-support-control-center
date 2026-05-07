@@ -568,7 +568,7 @@ export async function POST(request: Request) {
     console.log("telegram-message-saved", { chatId, messageId: message.message_id, rowId: storedMessage?.id });
     if (!hasImageAttachment) {
       console.log("text-message-queued", { chatId, messageId: message.message_id, rowId: storedMessage?.id });
-      console.log("instant-mark-forward-disabled", { chatId, messageId: message.message_id });
+      console.log("mark-instant-text-forward-disabled", { chatId, messageId: message.message_id });
       console.log("conversation-burst-message-held-for-batch", { chatId, messageId: message.message_id });
     }
 
