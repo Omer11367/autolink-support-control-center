@@ -10,6 +10,7 @@ type BatchTicket = {
   extracted_data: unknown;
   internal_summary: string | null;
   created_at: string | null;
+  holding_message_id: string | number | null;
 };
 
 type SheetAction = {
@@ -21,6 +22,7 @@ type SheetAction = {
 };
 
 const CATEGORY_ORDER = ["Share", "Unshare", "Deposits", "Payment Issues", "Verification", "Account Issues", "General"] as const;
+const BATCH_DELAY_MINUTES = 5;
 const CLIENT_BATCH_REPLY = "Understood, I’ll update you once I have confirmation.";
 
 function firstEnv(names: string[]): string | undefined {
@@ -143,7 +145,7 @@ function buildMarkSummary(tickets: BatchTicket[]): string {
     })
     .filter(Boolean);
 
-  return ["NEW REQUESTS BATCH", ...sections].join("\n\n");
+  return ["📌 NEW REQUESTS BATCH", ...sections].join("\n\n");
 }
 
 async function handleBatch(request: Request) {
@@ -165,13 +167,15 @@ async function handleBatch(request: Request) {
       autoRefreshToken: false
     }
   });
+  const batchCutoffIso = new Date(Date.now() - BATCH_DELAY_MINUTES * 60 * 1000).toISOString();
 
   const { data, error } = await supabase
     .from("tickets")
-    .select("id, intent, client_chat_id, client_original_message, extracted_data, internal_summary, created_at")
+    .select("id, intent, client_chat_id, client_original_message, extracted_data, internal_summary, created_at, holding_message_id")
     .eq("needs_mark", true)
     .in("status", ["open", "new", "waiting_mark", "waiting_for_mark"])
     .is("internal_message_id", null)
+    .lte("created_at", batchCutoffIso)
     .order("created_at", { ascending: true })
     .limit(100);
 
@@ -185,6 +189,7 @@ async function handleBatch(request: Request) {
     return NextResponse.json({ ok: true, count: 0 });
   }
 
+  console.log("mark-batch-ready", { count: tickets.length });
   const markSummary = buildMarkSummary(tickets);
   const markSendResult = await maybeSendTelegramMessage({ chatId: markGroupChatId, text: markSummary });
   if (!markSendResult.sent || !markSendResult.telegramMessageId) {
@@ -203,6 +208,7 @@ async function handleBatch(request: Request) {
   const ticketsByClient = new Map<string, BatchTicket[]>();
   for (const ticket of tickets) {
     if (!ticket.client_chat_id) continue;
+    if (ticket.holding_message_id) continue;
     const key = String(ticket.client_chat_id);
     ticketsByClient.set(key, [...(ticketsByClient.get(key) ?? []), ticket]);
   }
@@ -225,7 +231,9 @@ async function handleBatch(request: Request) {
       await supabase
         .from("tickets")
         .update({ holding_message_id: clientSendResult.telegramMessageId, updated_at: new Date().toISOString() })
-        .in("id", clientTicketIds);
+        .in("id", clientTicketIds)
+        .is("holding_message_id", null);
+      console.log("client-ack-sent", { clientChatId, ticketCount: clientTickets.length });
     } catch (error) {
       console.error("telegram-batch-client-reply-error", {
         clientChatId,
@@ -236,17 +244,24 @@ async function handleBatch(request: Request) {
   console.log("batch-client-replies-sent", { clientGroups: clientReplyCount });
 
   for (const ticket of tickets) {
-    const { error: updateError } = await supabase
+    const { data: processedTicket, error: updateError } = await supabase
       .from("tickets")
       .update({ internal_message_id: markSendResult.telegramMessageId, updated_at: new Date().toISOString() })
       .eq("id", ticket.id)
-      .is("internal_message_id", null);
+      .is("internal_message_id", null)
+      .select("id");
 
     if (updateError) {
       console.error("supabase-update-error", { table: "tickets", ticketId: ticket.id, message: updateError.message });
       continue;
     }
 
+    if (!processedTicket || processedTicket.length === 0) {
+      console.log("duplicate-batch-prevented", { ticketId: ticket.id });
+      continue;
+    }
+
+    console.log("request-marked-as-processed", { ticketId: ticket.id });
     console.log("mark-batch-request-marked-sent", { ticketId: ticket.id });
   }
 
