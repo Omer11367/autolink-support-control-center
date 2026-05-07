@@ -124,6 +124,30 @@ function isGreetingOnly(text: string): boolean {
   return ["hey", "hi", "hello", "yo", "good morning", "good evening", "good night", "how are you"].includes(normalized);
 }
 
+function isPureNonSupportChatter(text: string): boolean {
+  const normalized = normalizeComparableText(text).replace(/[!?.,]+$/g, "");
+  const reactionOnly = /^[\s\u{1F44D}\u2764\uFE0F\u2705\u{1F64F}]+$/u.test(text.trim());
+  const chatterPhrases = [
+    "hi",
+    "hello",
+    "hey",
+    "yo",
+    "good morning",
+    "good evening",
+    "good night",
+    "thanks",
+    "thank you",
+    "thx",
+    "ty",
+    "ok",
+    "okay",
+    "alright",
+    "received",
+    "noted"
+  ];
+  return reactionOnly || chatterPhrases.includes(normalized);
+}
+
 function hasRequestSignal(text: string): boolean {
   const normalized = normalizeComparableText(text);
   return /\b(share|unshare|remove|bm|account|deposit|sent|paid|payment|funds|usdt|usd|verify|verification|disabled|restricted|failed|issue|problem|check|status|availability|need|request|refund)\b|\$|\d/.test(normalized);
@@ -577,9 +601,9 @@ Deno.serve(async (request) => {
 
     const text = (message.text ?? message.caption ?? "").trim();
 
-    if (!text || shouldIgnoreTelegramMessage(text)) {
+    if (!text || shouldIgnoreTelegramMessage(text) || isPureNonSupportChatter(text)) {
       console.log("non-request-message-skipped", { chatId, messageId: message.message_id });
-      return json({ ok: true, ignored: "empty_or_reaction" });
+      return json({ ok: true, ignored: "non_support_chatter" });
     }
 
     console.log("instant-mark-forward-disabled", { chatId, messageId: message.message_id });

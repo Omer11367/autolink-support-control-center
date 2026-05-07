@@ -474,6 +474,13 @@ function classifyIncomingTextKind(text: string): TextKind {
   return "support_request";
 }
 
+function isPureNonSupportChatter(text: string): boolean {
+  const normalized = normalizeComparableText(text).replace(/[!?.,]+$/g, "");
+  const reactionOnly = /^[\s\u{1F44D}\u2764\uFE0F\u2705\u{1F64F}]+$/u.test(text.trim());
+  if (reactionOnly) return true;
+  return classifyIncomingTextKind(normalized) !== "support_request";
+}
+
 function messageFragmentsLookRelated(a: string, b: string): boolean {
   const aa = normalizeComparableText(a);
   const bb = normalizeComparableText(b);
@@ -545,6 +552,11 @@ export async function POST(request: Request) {
 
     if (!clientMessageText) {
       return NextResponse.json({ ok: true, ignored: "empty_message" });
+    }
+
+    if (!hasImageAttachment && isPureNonSupportChatter(clientMessageText)) {
+      console.log("non-request-message-skipped", { chatId, messageId: message.message_id, reason: "pure_chatter" });
+      return NextResponse.json({ ok: true, ignored: "non_support_chatter" });
     }
 
     const { data: storedMessage, error: messageError } = await supabase
