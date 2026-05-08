@@ -3,10 +3,20 @@ import "server-only";
 type SendTelegramMessageInput = {
   chatId: string | number;
   text: string;
+  source?: "telegram_batch" | "manual_action";
 };
 
-export async function maybeSendTelegramMessage({ chatId, text }: SendTelegramMessageInput) {
+export async function maybeSendTelegramMessage({ chatId, text, source }: SendTelegramMessageInput) {
   const token = process.env.TELEGRAM_BOT_TOKEN;
+
+  if (source !== "telegram_batch") {
+    console.log("telegram-send-blocked-non-batch", { source: source ?? "unknown" });
+    return {
+      sent: false,
+      telegramMessageId: null as number | null,
+      reason: "Telegram sends are disabled outside the 5-minute batch route."
+    };
+  }
 
   if (!token || !chatId || !text.trim()) {
     return {

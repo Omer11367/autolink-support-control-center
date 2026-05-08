@@ -408,7 +408,7 @@ async function handleBatch(request: Request) {
 
   console.log("mark-batch-ready", { count: tickets.length });
   const markSummary = buildMarkSummary(tickets);
-  const markSendResult = await maybeSendTelegramMessage({ chatId: markGroupChatId, text: markSummary });
+  const markSendResult = await maybeSendTelegramMessage({ chatId: markGroupChatId, text: markSummary, source: "telegram_batch" });
   if (!markSendResult.sent || !markSendResult.telegramMessageId) {
     throw new Error(markSendResult.reason ?? "Mark batch summary was not sent.");
   }
@@ -433,7 +433,7 @@ async function handleBatch(request: Request) {
   for (const [clientChatId, clientTickets] of ticketsByClient.entries()) {
     try {
       const clientReply = chooseClientReply(clientTickets);
-      const clientSendResult = await maybeSendTelegramMessage({ chatId: clientChatId, text: clientReply });
+      const clientSendResult = await maybeSendTelegramMessage({ chatId: clientChatId, text: clientReply, source: "telegram_batch" });
       clientReplyCount += 1;
 
       await supabase.from("bot_responses").insert({
