@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { createClient } from "@supabase/supabase-js";
+import { createClient, type SupabaseClient } from "@supabase/supabase-js";
 import { classifyIntent } from "@/lib/intent-classifier";
 import { writeClientRequestRowToGoogleSheet } from "@/lib/google-sheets";
 import { maybeSendTelegramMessage } from "@/lib/telegram";
@@ -45,6 +45,8 @@ type SheetAction = {
   bm?: string;
   amount?: string;
 };
+
+type SupabaseAdminClient = SupabaseClient;
 
 const CATEGORY_ORDER = ["Share", "Unshare", "Deposits", "Payment Issues", "Verification", "Account Issues", "General"] as const;
 const BATCH_DELAY_MINUTES = 5;
@@ -225,7 +227,7 @@ function getUsername(message: QueuedMessage): string {
 }
 
 async function createTicketsFromQueuedMessages(
-  supabase: ReturnType<typeof createClient>,
+  supabase: SupabaseAdminClient,
   messages: QueuedMessage[]
 ): Promise<BatchTicket[]> {
   const messagesByChat = new Map<string, QueuedMessage[]>();
