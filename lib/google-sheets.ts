@@ -14,9 +14,8 @@ type WriteClientRequestRowInput = {
 const SHEET_HEADERS = [
   "Date",
   "Time",
-  "Ticket ID",
   "Category",
-  "Client Group",
+  "Telegram Group",
   "Username",
   "Original Message",
   "Parsed Summary",
@@ -34,16 +33,6 @@ const CATEGORY_COLORS: Record<string, { red: number; green: number; blue: number
   Verification: { red: 0.49, green: 0.28, blue: 0.74 },
   "Account Issues": { red: 0.42, green: 0.45, blue: 0.50 },
   General: { red: 0.35, green: 0.39, blue: 0.45 }
-};
-
-const CATEGORY_PREFIXES: Record<string, string> = {
-  Share: "S",
-  Unshare: "U",
-  Deposits: "D",
-  "Payment Issues": "P",
-  Verification: "V",
-  "Account Issues": "A",
-  General: "G"
 };
 
 function mapIntentToCategory(intent: string): string {
@@ -69,13 +58,22 @@ function parseClientSheetsMap(raw: string | undefined): Record<string, string> {
   );
 }
 
-function getSpreadsheetIdForClient(map: Record<string, string>, groupName: string): string | null {
-  if (!groupName.trim()) return null;
-  const exact = map[groupName];
-  if (exact) return exact;
-  const normalized = groupName.trim().toLowerCase();
-  const foundEntry = Object.entries(map).find(([name]) => name.trim().toLowerCase() === normalized);
-  return foundEntry?.[1] ?? null;
+function extractSpreadsheetId(value: string): string | null {
+  const trimmed = value.trim();
+  if (!trimmed) return null;
+  const match = trimmed.match(/\/spreadsheets\/d\/([A-Za-z0-9_-]+)/);
+  return match?.[1] ?? trimmed;
+}
+
+function getCentralSpreadsheetId(raw: string | undefined, map: Record<string, string>): string | null {
+  const firstMappedId = Object.values(map).find((value) => value.trim());
+  if (firstMappedId) return extractSpreadsheetId(firstMappedId);
+  return raw?.trim().startsWith("{") ? null : extractSpreadsheetId(raw ?? "");
+}
+
+function sanitizeSheetTitle(title: string): string {
+  const cleanTitle = title.replace(/[:\\/?*[\]]/g, " ").replace(/\s+/g, " ").trim();
+  return (cleanTitle || "Unknown Group").slice(0, 100);
 }
 
 function isHeaderRow(values: string[]): boolean {
@@ -208,7 +206,7 @@ async function ensureSheetTabReady(
 
   const headerResponse = await sheets.spreadsheets.values.get({
     spreadsheetId,
-    range: `${quoteSheetName(tabName)}!A1:J1`
+    range: `${quoteSheetName(tabName)}!A1:I1`
   });
   const currentHeader = (headerResponse.data.values?.[0] ?? []).map((value) => String(value ?? ""));
   const shouldWriteHeaders = !isHeaderRow(currentHeader);
@@ -273,7 +271,7 @@ async function ensureSheetTabReady(
         },
         {
           setDataValidation: {
-            range: { sheetId, startRowIndex: 1, startColumnIndex: 8, endColumnIndex: 9 },
+            range: { sheetId, startRowIndex: 1, startColumnIndex: 7, endColumnIndex: 8 },
             rule: {
               condition: {
                 type: "ONE_OF_LIST",
@@ -313,36 +311,12 @@ async function ensureSheetTabReady(
   if (shouldWriteHeaders) {
     await sheets.spreadsheets.values.update({
       spreadsheetId,
-      range: `${quoteSheetName(tabName)}!A1:J1`,
+      range: `${quoteSheetName(tabName)}!A1:I1`,
       valueInputOption: "RAW",
       requestBody: { values: [SHEET_HEADERS] }
     });
   }
   console.log("google-sheets-format-success", { spreadsheetId, tabName });
-}
-
-async function generateTicketId(
-  sheets: ReturnType<typeof google.sheets>,
-  spreadsheetId: string,
-  tabName: string
-): Promise<string> {
-  const prefix = CATEGORY_PREFIXES[tabName] ?? "G";
-  const response = await sheets.spreadsheets.values.get({
-    spreadsheetId,
-    range: `${quoteSheetName(tabName)}!C2:C`
-  });
-  const ids = (response.data.values ?? [])
-    .flat()
-    .map((value) => String(value ?? "").trim())
-    .filter((value) => value.startsWith(`${prefix}-`));
-
-  const max = ids.reduce((highest, value) => {
-    const number = Number(value.replace(`${prefix}-`, ""));
-    return Number.isFinite(number) ? Math.max(highest, number) : highest;
-  }, 1000);
-  const ticketId = `${prefix}-${max + 1}`;
-  console.log("google-sheets-ticket-generated", { tabName, ticketId });
-  return ticketId;
 }
 
 export async function writeClientRequestRowToGoogleSheet(input: WriteClientRequestRowInput) {
@@ -359,10 +333,12 @@ export async function writeClientRequestRowToGoogleSheet(input: WriteClientReque
   }
 
   let serviceAccount: { client_email: string; private_key: string };
-  let clientSheetsMap: Record<string, string>;
+  let clientSheetsMap: Record<string, string> = {};
   try {
     serviceAccount = JSON.parse(serviceJsonRaw) as { client_email: string; private_key: string };
-    clientSheetsMap = parseClientSheetsMap(sheetsMapRaw);
+    if (sheetsMapRaw?.trim().startsWith("{")) {
+      clientSheetsMap = parseClientSheetsMap(sheetsMapRaw);
+    }
   } catch (error) {
     console.log("google-sheets-row-write-failed", {
       stage: "env_parse",
@@ -371,9 +347,9 @@ export async function writeClientRequestRowToGoogleSheet(input: WriteClientReque
     return;
   }
 
-  const spreadsheetId = getSpreadsheetIdForClient(clientSheetsMap, input.telegramGroup);
+  const spreadsheetId = getCentralSpreadsheetId(sheetsMapRaw, clientSheetsMap);
   if (!spreadsheetId) {
-    console.log("google-sheets-no-client-map", { telegramGroup: input.telegramGroup });
+    console.log("google-sheets-no-client-map", { reason: "missing_central_spreadsheet" });
     return;
   }
   console.log("google-sheets-spreadsheet-found", { telegramGroup: input.telegramGroup });
@@ -391,20 +367,19 @@ export async function writeClientRequestRowToGoogleSheet(input: WriteClientReque
     console.log("google-sheets-client-created", { telegramGroup: input.telegramGroup });
 
     const category = mapIntentToCategory(input.intent);
+    const tabName = sanitizeSheetTitle(input.telegramGroup);
     console.log("sheets-category-selected", { category, intent: input.intent });
-    await ensureSheetTabReady(sheets, spreadsheetId, category);
+    await ensureSheetTabReady(sheets, spreadsheetId, tabName);
 
     const now = input.now ?? new Date();
     const date = now.toISOString().slice(0, 10);
     const time = now.toTimeString().slice(0, 8);
-    const ticketId = await generateTicketId(sheets, spreadsheetId, category);
     const parsedSummary = generateParsedSummary(input.intent, input.originalMessage, input.parsedMessage, input.extractedData);
-    console.log("google-sheets-summary-generated", { tab: category, ticketId, parsedSummary });
+    console.log("google-sheets-summary-generated", { tab: tabName, category, parsedSummary });
 
     const row = [
       date,
       time,
-      ticketId,
       category,
       input.telegramGroup,
       input.username,
@@ -414,15 +389,15 @@ export async function writeClientRequestRowToGoogleSheet(input: WriteClientReque
       ""
     ];
 
-    console.log("google-sheets-row-write-start", { tab: category });
+    console.log("google-sheets-row-write-start", { tab: tabName, category });
     await sheets.spreadsheets.values.append({
       spreadsheetId,
-      range: `${quoteSheetName(category)}!A:J`,
+      range: `${quoteSheetName(tabName)}!A:I`,
       valueInputOption: "RAW",
       requestBody: { values: [row] }
     });
-    console.log("google-sheets-row-write-success", { tab: category });
-    console.log("sheets-row-written", { tab: category, ticketId });
+    console.log("google-sheets-row-write-success", { tab: tabName, category });
+    console.log("sheets-row-written", { tab: tabName, category });
   } catch (error) {
     console.log("google-sheets-row-write-failed", {
       stage: "append",
