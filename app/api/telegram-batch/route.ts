@@ -48,7 +48,7 @@ type SheetAction = {
 
 const CATEGORY_ORDER = ["Share", "Unshare", "Deposits", "Payment Issues", "Verification", "Account Issues", "General"] as const;
 const BATCH_DELAY_MINUTES = 5;
-const MESSAGE_LOOKBACK_MINUTES = 15;
+const MESSAGE_LOOKBACK_MINUTES = 24 * 60;
 const CLIENT_BATCH_REPLY = "Understood, I’ll check and update you.";
 
 function firstEnv(names: string[]): string | undefined {
