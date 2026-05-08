@@ -55,7 +55,30 @@ const RULES: IntentRule[] = [
   },
   {
     intent: "deposit_funds",
-    phrases: ["paid", "payment done", "deposit", "funds sent", "transferred", "top up", "usdt", "sent money", "dollar", "usd", "please check payment"],
+    phrases: [
+      "paid",
+      "payment done",
+      "deposit",
+      "deposited",
+      "deposit sent",
+      "funds sent",
+      "transferred",
+      "transfer sent",
+      "top up",
+      "usdt",
+      "sent money",
+      "sent",
+      "dollar",
+      "usd",
+      "payment proof",
+      "proof of payment",
+      "transaction hash",
+      "tx hash",
+      "etherscan",
+      "check deposit",
+      "please confirm deposit",
+      "please check payment"
+    ],
     completionOptions: ["Funds arrived", "Handled"],
     note: "Never confirm funds automatically."
   },
@@ -71,7 +94,7 @@ const RULES: IntentRule[] = [
   },
   {
     intent: "check_availability",
-    phrases: ["available", "availability", "do you have", "stock", "can we request"],
+    phrases: ["available", "availability", "do you have", "do you have accounts", "accounts available", "stock", "can we request"],
     completionOptions: ["Not available", "Handled"]
   },
   {
@@ -82,7 +105,7 @@ const RULES: IntentRule[] = [
   },
   {
     intent: "check_account_status",
-    phrases: ["status", "check status", "account status", "active", "blocked", "disabled", "usable", "can run ads"],
+    phrases: ["status", "check status", "account status", "active", "blocked", "disabled", "restricted", "banned", "usable", "can run ads", "account problem"],
     completionOptions: ["Handled"]
   },
   {
@@ -93,7 +116,24 @@ const RULES: IntentRule[] = [
   },
   {
     intent: "payment_issue",
-    phrases: ["debt", "balance issue", "payment issue", "cannot launch campaigns", "campaigns blocked"],
+    phrases: [
+      "debt",
+      "balance issue",
+      "payment issue",
+      "payment failed",
+      "cannot pay",
+      "can't pay",
+      "credit card problem",
+      "card problem",
+      "card verification issue",
+      "verify card",
+      "payment method rejected",
+      "payment method problem",
+      "card rejected",
+      "payment declined",
+      "cannot launch campaigns",
+      "campaigns blocked"
+    ],
     completionOptions: ["Done", "Handled"]
   },
   {
@@ -439,7 +479,26 @@ function extractAccessLevel(text: string): AccessLevel {
 }
 
 function hasPaymentContext(text: string): boolean {
-  return /\b(payment|deposit|sent|paid|funds?|usdt|usd|dollars?|top\s*up|transferred)\b|\$/i.test(text);
+  return /\b(payment|deposit|deposited|sent|paid|funds?|usdt|usd|dollars?|top\s*up|transferred|transfer|transaction\s+hash|tx\s+hash|etherscan|payment\s+proof|proof\s+of\s+payment)\b|\$/i.test(text);
+}
+
+function hasPaymentIssuePriority(text: string): boolean {
+  return /\b(card\s+verification\s+issue|verify\s+card|payment\s+failed|cannot\s+pay|can't\s+pay|credit\s+card\s+problem|card\s+problem|payment\s+method\s+(?:rejected|problem|failed)|card\s+rejected|payment\s+declined)\b/i.test(text);
+}
+
+function hasDepositPriority(text: string): boolean {
+  if (hasPaymentIssuePriority(text)) return false;
+
+  const hasTransferProof = /\b(payment\s+proof|proof\s+of\s+payment|transaction\s+hash|tx\s+hash|etherscan|usdt|trc20|erc20|hash)\b|https?:\/\/\S*etherscan\S*/i.test(text);
+  const hasDepositWords = /\b(sent|deposit|deposited|paid|funds?\s+sent|transfer(?:red)?|top\s*up|money\s+sent|check\s+deposit)\b/i.test(text);
+  const hasAmount = /(?:\$|usd\s*)?\d+(?:[,.]\d+)?\s*(?:k|K)?\s*(?:usdt|usd|dollars?|\$)?/i.test(text);
+  const asksToCheck = /\b(check|confirm|please\s+check|check\s+please)\b/i.test(text);
+
+  return hasTransferProof || (hasDepositWords && (hasAmount || asksToCheck));
+}
+
+function hasAccountIssuePriority(text: string): boolean {
+  return /\b(?:account\s+)?(?:disabled|restricted|banned|blocked)|account\s+problem\b/i.test(text);
 }
 
 function hasAccountContextNear(text: string, start: number, end: number): boolean {
@@ -518,7 +577,21 @@ export function classifyIntent(message: string, previousContext = ""): Classifie
   }).sort((a, b) => b.score - a.score);
 
   const inferredRequestAccounts = /\b(?:need|request|want|more)\s+\d+\s+(?:ad\s+)?accounts?\b/i.test(combined);
-  const best = ranked.find((entry) => entry.score > 0) ??
+  const priorityIntent =
+    hasPaymentIssuePriority(combined)
+      ? "payment_issue"
+      : hasDepositPriority(combined)
+        ? "deposit_funds"
+        : hasAccountIssuePriority(combined)
+          ? "check_account_status"
+          : null;
+  const best = priorityIntent
+    ? {
+        rule: RULES.find((rule) => rule.intent === priorityIntent) ?? RULES[0],
+        matched: [`Priority detected: ${priorityIntent}`],
+        score: 3
+      }
+    : ranked.find((entry) => entry.score > 0) ??
     (inferredRequestAccounts
       ? {
           rule: RULES.find((rule) => rule.intent === "request_accounts") ?? RULES[0],
