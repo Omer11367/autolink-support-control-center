@@ -39,6 +39,8 @@ type BatchTicket = {
   holding_message_id: string | number | null;
 };
 
+type BatchMarkerType = "batch_client_greeting" | "batch_non_request_skipped" | "batch_duplicate_skipped";
+
 type SheetAction = {
   type?: string;
   account?: string;
@@ -52,7 +54,11 @@ type SupabaseAdminClient = SupabaseClient<Database, "public">;
 const CATEGORY_ORDER = ["Share", "Unshare", "Deposits", "Payment Issues", "Verification", "Account Issues", "General"] as const;
 const BATCH_DELAY_MINUTES = 5;
 const MESSAGE_LOOKBACK_MINUTES = 24 * 60;
+const BATCH_MARKER_TYPES: BatchMarkerType[] = ["batch_client_greeting", "batch_non_request_skipped", "batch_duplicate_skipped"];
+const CLEAN_CLIENT_BATCH_REPLY = "Understood, I'll check and update you.";
 const CLIENT_BATCH_REPLY = "Understood, I’ll check and update you.";
+const BATCH_REPLY_ENCODING_CHECK = CLIENT_BATCH_REPLY.includes("â");
+const USE_CLEAN_CLIENT_BATCH_REPLY = Boolean(CLIENT_BATCH_REPLY) || BATCH_REPLY_ENCODING_CHECK;
 
 function firstEnv(names: string[]): string | undefined {
   for (const name of names) {
@@ -87,6 +93,11 @@ function isPureNonSupportChatter(text: string): boolean {
   const reactionOnly = /^[\s\u{1F44D}\u2764\uFE0F\u2705\u{1F64F}]+$/u.test(text.trim());
   const chatter = ["hi", "hello", "hey", "yo", "good morning", "good evening", "good night", "thanks", "thank you", "thx", "ty", "ok", "okay", "alright", "received", "noted"];
   return reactionOnly || chatter.includes(normalized);
+}
+
+function isGreetingText(text: string): boolean {
+  const normalized = normalizeComparableText(text);
+  return ["hi", "hello", "hey", "yo", "good morning", "good evening", "good night"].includes(normalized);
 }
 
 function hasRequestSignal(text: string): boolean {
@@ -150,37 +161,42 @@ function cleanTaskText(ticket: BatchTicket): string {
   if (category === "Share") {
     const account = firstAccount(shareAction) ?? extractEntityAfter(original, ["account", "accounts", "acc", "ad account", "ad accounts"]);
     const bm = shareAction?.bm ?? extractEntityAfter(original, ["bm", "business manager"]);
-    if (account && bm) return `Please share account ${account} to BM ${bm}`;
-    if (account) return `Please share account ${account}`;
+    if (account && bm) return `share account ${account} to BM ${bm}`;
+    if (account) return `share account ${account}`;
   }
 
   if (category === "Unshare") {
     const account = firstAccount(unshareAction) ?? extractEntityAfter(original, ["account", "accounts", "acc", "ad account", "ad accounts"]);
     const bm = unshareAction?.bm ?? extractEntityAfter(original, ["bm", "business manager"]);
-    if (account && bm) return `Please unshare account ${account} from BM ${bm}`;
-    if (account) return `Please unshare account ${account}`;
+    if (account && bm) return `unshare account ${account} from BM ${bm}`;
+    if (account) return `unshare account ${account}`;
   }
 
   if (category === "Deposits") {
     const amount = paymentAction?.amount ?? extractAmount(original);
-    return amount ? `Client sent ${amount} deposit` : "Client sent deposit, please check";
+    return amount ? `sent ${amount}, please check` : "deposit sent, please check";
   }
 
   if (category === "Payment Issues") {
     const account = firstAccount(accountStatusAction) ?? extractEntityAfter(original, ["account", "accounts", "acc", "ad account", "ad accounts"]);
-    return account ? `Payment issue on account ${account}` : "Payment issue reported";
+    if (account && /\bfailed\b/i.test(original)) return `payment failed on account ${account}`;
+    return account ? `payment issue on account ${account}` : "payment issue reported";
   }
 
   if (category === "Verification") {
+    const bm = extractEntityAfter(original, ["bm", "business manager"]);
     const account = firstAccount(verifyAction) ?? extractEntityAfter(original, ["account", "accounts", "acc", "ad account", "ad accounts"]);
-    return account ? `Please verify account ${account}` : "Verification request";
+    if (bm) return `verify BM ${bm}`;
+    return account ? `verify account ${account}` : "verification request";
   }
 
   if (category === "Account Issues") {
     const account = firstAccount(accountStatusAction) ?? extractEntityAfter(original, ["account", "accounts", "acc", "ad account", "ad accounts"]);
-    return account ? `Account issue on account ${account}` : "Account issue reported";
+    if (account && /\b(disabled|restricted|blocked)\b/i.test(original)) return `account ${account} disabled`;
+    return account ? `account issue on account ${account}` : "account issue reported";
   }
 
+  if (/\b(available|availability|stock)\b/i.test(original)) return "asked if accounts are available";
   return original || "General support request";
 }
 
@@ -189,24 +205,34 @@ function buildMarkSummary(tickets: BatchTicket[]): string {
   for (const category of CATEGORY_ORDER) grouped.set(category, []);
   for (const ticket of tickets) grouped.get(mapIntentToCategory(ticket.intent))?.push(cleanTaskText(ticket));
 
+  const headings: Record<typeof CATEGORY_ORDER[number], string> = {
+    Share: "SHARE REQUESTS",
+    Unshare: "UNSHARE REQUESTS",
+    Deposits: "DEPOSITS",
+    "Payment Issues": "PAYMENT ISSUES",
+    Verification: "VERIFICATION",
+    "Account Issues": "ACCOUNT ISSUES",
+    General: "GENERAL QUESTIONS"
+  };
+
   const sections = CATEGORY_ORDER
     .map((category) => {
       const items = grouped.get(category) ?? [];
       if (items.length === 0) return null;
-      return [`${category.toUpperCase()}`, ...items.map((item) => `- ${escapeTelegramHtml(item)}`)].join("\n");
+      return [headings[category], ...items.map((item) => `* ${escapeTelegramHtml(item)}`)].join("\n\n");
     })
     .filter(Boolean);
 
-  return ["📌 NEW REQUESTS BATCH", ...sections].join("\n\n");
+  return ["\u{1F4CC} NEW REQUESTS BATCH", ...sections].join("\n\n");
 }
 
 function chooseClientReply(tickets: BatchTicket[]): string {
   const categories = tickets.map((ticket) => mapIntentToCategory(ticket.intent));
-  if (categories.includes("Deposits")) return "Understood, I’ll check the deposit and update you.";
-  if (categories.includes("Payment Issues")) return "Got it, I’ll check the payment issue and update you.";
-  if (categories.includes("Share") || categories.includes("Unshare")) return "Sure, I’ll check this and update you.";
+  if (categories.includes("Deposits")) return "Understood, I'll check the deposit and update you.";
+  if (categories.includes("Payment Issues")) return "Got it, I'll check the payment issue and update you.";
+  if (categories.includes("Share") || categories.includes("Unshare")) return "Sure, I'll check this and update you.";
   if (categories.includes("Verification")) return "Got it, checking the verification request now.";
-  return CLIENT_BATCH_REPLY;
+  return USE_CLEAN_CLIENT_BATCH_REPLY ? CLEAN_CLIENT_BATCH_REPLY : CLIENT_BATCH_REPLY;
 }
 
 function escapeTelegramHtml(value: string): string {
@@ -225,6 +251,42 @@ function getChatTitle(message: QueuedMessage): string {
 function getUsername(message: QueuedMessage): string {
   const telegramMessage = getTelegramMessage(message.raw_payload);
   return telegramMessage?.from?.username?.trim() || message.telegram_username?.trim() || "";
+}
+
+function chooseGreetingReply(messages: QueuedMessage[]): string {
+  const text = messages.map((message) => message.message_text ?? "").join(" ");
+  if (/good morning/i.test(text)) return "Good morning, how can I help?";
+  if (/good evening|good night/i.test(text)) return "Good evening, how can I help?";
+  return "Hi, how can I help?";
+}
+
+async function getLastBatchMarkerMs(supabase: SupabaseAdminClient, chatId: string): Promise<number> {
+  const { data, error } = await supabase
+    .from("bot_responses")
+    .select("created_at")
+    .eq("telegram_chat_id", chatId)
+    .in("response_type", BATCH_MARKER_TYPES)
+    .order("created_at", { ascending: false })
+    .limit(1)
+    .maybeSingle();
+  if (error) throw new Error(`Supabase batch marker query failed: ${error.message}`);
+  return data?.created_at ? new Date(data.created_at).getTime() : 0;
+}
+
+async function markChatBatchProcessed(
+  supabase: SupabaseAdminClient,
+  chatId: string,
+  responseType: BatchMarkerType,
+  responseText: string,
+  telegramMessageId: number | null = null
+) {
+  await supabase.from("bot_responses").insert({
+    ticket_id: null,
+    telegram_chat_id: chatId,
+    telegram_message_id: telegramMessageId,
+    response_type: responseType,
+    response_text: responseText
+  });
 }
 
 async function createTicketsFromQueuedMessages(
@@ -262,11 +324,13 @@ async function createTicketsFromQueuedMessages(
       const processedMessage = processedMessageData as { created_at: string | null } | null;
       processedThroughMs = processedMessage?.created_at ? new Date(processedMessage.created_at).getTime() : 0;
     }
+    processedThroughMs = Math.max(processedThroughMs, await getLastBatchMarkerMs(supabase, chatId));
 
     const unprocessedMessages = chatMessages.filter((message) => {
       const createdAtMs = message.created_at ? new Date(message.created_at).getTime() : 0;
       return createdAtMs > processedThroughMs;
     });
+    if (unprocessedMessages.length === 0) continue;
 
     const cleanMessages = unprocessedMessages
       .sort((a, b) => new Date(a.created_at ?? 0).getTime() - new Date(b.created_at ?? 0).getTime())
@@ -274,8 +338,22 @@ async function createTicketsFromQueuedMessages(
       .filter((text) => text && !isPureNonSupportChatter(text));
     const groupedText = compactText(cleanMessages.join(" "));
 
-    if (!groupedText || !hasRequestSignal(groupedText) || isIncompleteRequestFragment(groupedText)) {
+    if (!groupedText || !hasRequestSignal(groupedText)) {
       console.log("non-request-message-skipped", { chatId, messageCount: unprocessedMessages.length });
+      const messageTexts = unprocessedMessages.map((message) => compactText(message.message_text ?? "")).filter(Boolean);
+      if (messageTexts.some(isGreetingText)) {
+        const reply = chooseGreetingReply(unprocessedMessages);
+        const greetingResult = await maybeSendTelegramMessage({ chatId, text: reply, source: "telegram_batch" });
+        await markChatBatchProcessed(supabase, chatId, "batch_client_greeting", reply, greetingResult.telegramMessageId);
+        console.log("client-greeting-sent", { chatId, messageCount: unprocessedMessages.length });
+      } else {
+        await markChatBatchProcessed(supabase, chatId, "batch_non_request_skipped", "non-support chatter skipped");
+      }
+      continue;
+    }
+
+    if (isIncompleteRequestFragment(groupedText)) {
+      console.log("support-fragment-held-for-next-batch", { chatId, groupedText });
       continue;
     }
 
@@ -283,6 +361,7 @@ async function createTicketsFromQueuedMessages(
     const classification = classifyIntent(groupedText);
     if (!classification.requiresMark || classification.intent === "no_action") {
       console.log("non-request-message-skipped", { chatId, intent: classification.intent });
+      await markChatBatchProcessed(supabase, chatId, "batch_non_request_skipped", "no-action batch skipped");
       continue;
     }
 
@@ -299,6 +378,7 @@ async function createTicketsFromQueuedMessages(
     const duplicateTicket = duplicateTicketData as { id: string } | null;
     if (duplicateTicket?.id) {
       console.log("duplicate-batch-prevented", { chatId, ticketId: duplicateTicket.id });
+      await markChatBatchProcessed(supabase, chatId, "batch_duplicate_skipped", `duplicate ticket skipped: ${duplicateTicket.id}`);
       continue;
     }
 
