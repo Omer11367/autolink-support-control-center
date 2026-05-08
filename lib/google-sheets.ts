@@ -284,6 +284,18 @@ async function ensureSheetTabReady(
           }
         },
         {
+          setBasicFilter: {
+            filter: {
+              range: {
+                sheetId,
+                startRowIndex: 0,
+                startColumnIndex: 0,
+                endColumnIndex: SHEET_HEADERS.length
+              }
+            }
+          }
+        },
+        {
           autoResizeDimensions: {
             dimensions: { sheetId, dimension: "COLUMNS", startIndex: 0, endIndex: SHEET_HEADERS.length }
           }

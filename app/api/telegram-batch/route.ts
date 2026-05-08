@@ -166,10 +166,11 @@ function cleanTaskText(ticket: BatchTicket): string {
   }
 
   if (category === "Unshare") {
-    const account = firstAccount(unshareAction) ?? extractEntityAfter(original, ["account", "accounts", "acc", "ad account", "ad accounts"]);
+    const accounts = unshareAction?.accounts?.length ? unshareAction.accounts.join(", ") : null;
+    const account = accounts ?? firstAccount(unshareAction) ?? extractEntityAfter(original, ["account", "accounts", "acc", "ad account", "ad accounts"]);
     const bm = unshareAction?.bm ?? extractEntityAfter(original, ["bm", "business manager"]);
-    if (account && bm) return `unshare account ${account} from BM ${bm}`;
-    if (account) return `unshare account ${account}`;
+    if (account && bm) return `unshare accounts ${account} from ${bm}`;
+    if (account) return `unshare accounts ${account}`;
   }
 
   if (category === "Deposits") {
@@ -402,7 +403,7 @@ async function createTicketsFromQueuedMessages(
         holding_message_id: null,
         internal_message_id: null
       })
-      .select("id, intent, client_chat_id, client_original_message, extracted_data, internal_summary, created_at, holding_message_id")
+      .select("id, intent, client_chat_id, client_original_message, extracted_data, internal_summary, created_at")
       .single();
     const createdTicket = createdTicketData as BatchTicket | null;
     if (createTicketError || !createdTicket?.id) {

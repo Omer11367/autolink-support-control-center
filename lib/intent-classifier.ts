@@ -40,7 +40,7 @@ const RULES: IntentRule[] = [
   },
   {
     intent: "unshare_ad_account",
-    phrases: ["unbind", "unshare", "remove bm", "remove access", "disconnect", "unlink", "revoke access"],
+    phrases: ["unbind", "unshare", "unsher", "remove bm", "remove access", "remove from bm", "disconnect", "unlink", "revoke access", "take out from bm"],
     completionOptions: ["Done", "Handled"]
   },
   {
@@ -331,13 +331,22 @@ function readTokenValuesUntilStop(tokens: string[], startIndex: number, stopWord
 }
 
 function extractAccountsFromActionSegment(segment: string, actionType: "share_account" | "unshare_account"): string[] {
+  const looseUnshare = actionType === "unshare_account"
+    ? segment.match(/\b(?:unshare|unsher|remove|disconnect|unlink|revoke|take\s+out)\b\s+(?:this|these|those)?\s*([\s\S]*?)(?:\bfrom\b|$)/i)
+    : null;
+  if (looseUnshare?.[1]) {
+    const values = looseUnshare[1].match(/[A-Za-z0-9_-]+/g) ?? [];
+    const cleanValues = values.filter((value) => !["account", "accounts", "acc", "ad", "this", "these", "those"].includes(value.toLowerCase()));
+    if (cleanValues.length > 0) return uniqueStrings(cleanValues);
+  }
+
   const labeled = extractLabeledShareEntities(segment).adAccountIds;
   if (labeled.length > 0) return labeled;
 
   const tokens = segment.split(/\s+/).filter(Boolean);
   const actionWords = actionType === "share_account"
     ? ["share", "add", "connect", "link", "attach"]
-    : ["unshare", "remove", "disconnect", "unlink", "revoke"];
+    : ["unshare", "unsher", "remove", "disconnect", "unlink", "revoke"];
   const startIndex = tokens.findIndex((token) => actionWords.includes(tokenKey(token)));
   if (startIndex < 0) return [];
 
@@ -372,7 +381,7 @@ function extractBmFromActionSegment(segment: string, actionType: "share_account"
 }
 
 function splitActionSegments(message: string): Array<{ type: "share_account" | "unshare_account"; text: string }> {
-  const actionPattern = /\b(unshare|remove|disconnect|unlink|revoke|share|add|connect|link|attach)\b/gi;
+  const actionPattern = /\b(unshare|unsher|remove|disconnect|unlink|revoke|share|add|connect|link|attach)\b/gi;
   const matches = Array.from(message.matchAll(actionPattern));
   const segments: Array<{ type: "share_account" | "unshare_account"; text: string }> = [];
 
@@ -381,7 +390,7 @@ function splitActionSegments(message: string): Array<{ type: "share_account" | "
     const keyword = match[1]?.toLowerCase();
     const start = match.index ?? 0;
     const end = matches[index + 1]?.index ?? message.length;
-    const type = ["unshare", "remove", "disconnect", "unlink", "revoke"].includes(keyword ?? "")
+    const type = ["unshare", "unsher", "remove", "disconnect", "unlink", "revoke"].includes(keyword ?? "")
       ? "unshare_account"
       : "share_account";
 
@@ -428,7 +437,7 @@ function extractShareActions(message: string): DetectedAction[] {
     addAction(actions, { type: "share_account", account: sharedAccount, bm: shareBm });
   }
 
-  const unshareMatch = message.match(/\b(?:unshare|remove|disconnect|unlink|revoke)\b(?:[\s\S]*?\b(?:ad\s+)?accounts?\s+([A-Za-z0-9_-]+))?[\s\S]*?\b(?:from\s+)?(?:bm|business\s+manager)\s+([A-Za-z0-9_-]+)/i);
+  const unshareMatch = message.match(/\b(?:unshare|unsher|remove|disconnect|unlink|revoke)\b(?:[\s\S]*?\b(?:ad\s+)?accounts?\s+([A-Za-z0-9_-]+))?[\s\S]*?\b(?:from\s+)?(?:bm|business\s+manager)?\s*([A-Za-z0-9_-]+)/i);
   const unshareAccount = cleanEntityToken(unshareMatch?.[1] ?? sharedAccount);
   const unshareBm = cleanEntityToken(unshareMatch?.[2] ?? "");
 

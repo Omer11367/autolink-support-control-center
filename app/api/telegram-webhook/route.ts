@@ -42,6 +42,7 @@ type TelegramUpdate = {
   message?: TelegramMessage;
   edited_message?: TelegramMessage;
   channel_post?: TelegramMessage;
+  edited_channel_post?: TelegramMessage;
 };
 
 function firstEnv(names: string[]): string | undefined {
@@ -88,7 +89,7 @@ export async function POST(request: Request) {
     });
 
     const update = (await request.json()) as TelegramUpdate;
-    const message = update.message ?? update.edited_message ?? update.channel_post;
+    const message = update.message ?? update.edited_message ?? update.channel_post ?? update.edited_channel_post;
 
     if (!message?.chat?.id) {
       return NextResponse.json({ ok: true, ignored: "no_message" });
@@ -113,7 +114,55 @@ export async function POST(request: Request) {
       return NextResponse.json({ ok: true, ignored: "empty_message" });
     }
 
-    const { data: storedMessage, error: messageError } = await supabase
+    const isEditedMessage = Boolean(update.edited_message || update.edited_channel_post);
+
+    if (isEditedMessage) {
+      const { data: existingMessage, error: existingMessageError } = await supabase
+        .from("messages")
+        .select("id")
+        .eq("telegram_message_id", message.message_id)
+        .eq("telegram_chat_id", chatId)
+        .in("message_type", ["client", "client_photo"])
+        .maybeSingle();
+
+      if (existingMessageError) throw new Error(`Supabase edited message lookup failed: ${existingMessageError.message}`);
+      if (!existingMessage?.id) {
+        console.log("edited-message-no-unprocessed-row", { chatId, messageId: message.message_id });
+        return NextResponse.json({ ok: true, ignored: "edited_message_not_queued" });
+      }
+
+      const { data: processedTicket, error: processedTicketError } = await supabase
+        .from("tickets")
+        .select("id")
+        .eq("client_message_id", existingMessage.id)
+        .limit(1)
+        .maybeSingle();
+
+      if (processedTicketError) throw new Error(`Supabase edited message ticket lookup failed: ${processedTicketError.message}`);
+      if (processedTicket?.id) {
+        console.log("edited-message-already-processed", { chatId, messageId: message.message_id });
+        return NextResponse.json({ ok: true, ignored: "edited_message_already_processed" });
+      }
+
+      const { data: storedMessage, error: messageError } = await supabase
+        .from("messages")
+        .update({
+          telegram_user_id: message.from?.id ?? null,
+          telegram_username: message.from?.username ?? null,
+          message_text: clientMessageText,
+          message_type: hasImageAttachment ? "client_photo" : "client",
+          raw_payload: update
+        })
+        .eq("id", existingMessage.id)
+        .select("id, created_at, message_text, message_type, telegram_message_id")
+        .single();
+
+      if (messageError) throw new Error(`Supabase edited message update failed: ${messageError.message}`);
+      console.log("telegram-message-edited", { chatId, messageId: message.message_id, rowId: storedMessage?.id });
+      return NextResponse.json({ ok: true, queued: true, edited: true, rowId: storedMessage?.id ?? null });
+    }
+
+    const { data: insertedMessage, error: insertSelectError } = await supabase
       .from("messages")
       .insert({
         telegram_message_id: message.message_id,
@@ -127,23 +176,23 @@ export async function POST(request: Request) {
       .select("id, created_at, message_text, message_type, telegram_message_id")
       .single();
 
-    if (messageError) {
-      console.error("supabase-insert-error", { table: "messages", message: messageError.message });
-      throw new Error(`Supabase messages insert failed: ${messageError.message}`);
+    if (insertSelectError) {
+      console.error("supabase-insert-error", { table: "messages", message: insertSelectError.message });
+      throw new Error(`Supabase messages insert failed: ${insertSelectError.message}`);
     }
 
-    console.log("telegram-message-saved", { chatId, messageId: message.message_id, rowId: storedMessage?.id });
+    console.log("telegram-message-saved", { chatId, messageId: message.message_id, rowId: insertedMessage?.id });
 
     if (hasImageAttachment) {
-      console.log("media-message-queued", { chatId, messageId: message.message_id, rowId: storedMessage?.id });
+      console.log("media-message-queued", { chatId, messageId: message.message_id, rowId: insertedMessage?.id });
     } else {
-      console.log("text-message-queued", { chatId, messageId: message.message_id, rowId: storedMessage?.id });
+      console.log("text-message-queued", { chatId, messageId: message.message_id, rowId: insertedMessage?.id });
       console.log("instant-mark-forward-disabled", { chatId, messageId: message.message_id });
       console.log("mark-instant-text-forward-disabled", { chatId, messageId: message.message_id });
       console.log("conversation-burst-message-held-for-batch", { chatId, messageId: message.message_id });
     }
 
-    return NextResponse.json({ ok: true, queued: true, rowId: storedMessage?.id ?? null });
+    return NextResponse.json({ ok: true, queued: true, rowId: insertedMessage?.id ?? null });
   } catch (error) {
     console.error("telegram-webhook-error", error);
     return NextResponse.json(
