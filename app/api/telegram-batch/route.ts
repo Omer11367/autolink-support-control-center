@@ -3,6 +3,7 @@ import { createClient, type SupabaseClient } from "@supabase/supabase-js";
 import { classifyIntent } from "@/lib/intent-classifier";
 import { writeClientRequestRowToGoogleSheet } from "@/lib/google-sheets";
 import { maybeSendTelegramMessage } from "@/lib/telegram";
+import type { Database } from "@/lib/supabase/database.types";
 
 type QueuedMessage = {
   id: string;
@@ -46,7 +47,7 @@ type SheetAction = {
   amount?: string;
 };
 
-type SupabaseAdminClient = SupabaseClient;
+type SupabaseAdminClient = SupabaseClient<Database, "public">;
 
 const CATEGORY_ORDER = ["Share", "Unshare", "Deposits", "Payment Issues", "Verification", "Account Issues", "General"] as const;
 const BATCH_DELAY_MINUTES = 5;
@@ -368,7 +369,7 @@ async function handleBatch(request: Request) {
   const supabaseUrl = requireEnv("NEXT_PUBLIC_SUPABASE_URL or SUPABASE_URL", ["NEXT_PUBLIC_SUPABASE_URL", "SUPABASE_URL"]);
   const serviceRoleKey = requireEnv("SERVICE_ROLE_KEY or SUPABASE_SERVICE_ROLE_KEY", ["SERVICE_ROLE_KEY", "SUPABASE_SERVICE_ROLE_KEY"]);
 
-  const supabase = createClient(supabaseUrl, serviceRoleKey, {
+  const supabase = createClient<Database, "public">(supabaseUrl, serviceRoleKey, {
     auth: {
       persistSession: false,
       autoRefreshToken: false
@@ -387,7 +388,7 @@ async function handleBatch(request: Request) {
     .limit(500);
   if (queuedMessagesError) throw new Error(`Supabase queued messages query failed: ${queuedMessagesError.message}`);
 
-  const createdTickets = await createTicketsFromQueuedMessages(supabase, (queuedMessagesData ?? []) as QueuedMessage[]);
+  const createdTickets = await createTicketsFromQueuedMessages(supabase, (queuedMessagesData ?? []) as unknown as QueuedMessage[]);
 
   const { data, error } = await supabase
     .from("tickets")
