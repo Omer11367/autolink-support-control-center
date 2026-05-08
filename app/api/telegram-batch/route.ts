@@ -237,7 +237,7 @@ async function createTicketsFromQueuedMessages(
 
   const createdTickets: BatchTicket[] = [];
   for (const [chatId, chatMessages] of messagesByChat.entries()) {
-    const { data: latestTicket, error: latestTicketError } = await supabase
+    const { data: latestTicketData, error: latestTicketError } = await supabase
       .from("tickets")
       .select("client_message_id")
       .eq("client_chat_id", chatId)
@@ -246,15 +246,17 @@ async function createTicketsFromQueuedMessages(
       .limit(1)
       .maybeSingle();
     if (latestTicketError) throw new Error(`Supabase latest ticket query failed: ${latestTicketError.message}`);
+    const latestTicket = latestTicketData as { client_message_id: string | null } | null;
 
     let processedThroughMs = 0;
     if (latestTicket?.client_message_id) {
-      const { data: processedMessage, error: processedMessageError } = await supabase
+      const { data: processedMessageData, error: processedMessageError } = await supabase
         .from("messages")
         .select("created_at")
         .eq("id", latestTicket.client_message_id)
         .maybeSingle();
       if (processedMessageError) throw new Error(`Supabase processed message query failed: ${processedMessageError.message}`);
+      const processedMessage = processedMessageData as { created_at: string | null } | null;
       processedThroughMs = processedMessage?.created_at ? new Date(processedMessage.created_at).getTime() : 0;
     }
 
@@ -282,7 +284,7 @@ async function createTicketsFromQueuedMessages(
     }
 
     const duplicateStartIso = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
-    const { data: duplicateTicket, error: duplicateError } = await supabase
+    const { data: duplicateTicketData, error: duplicateError } = await supabase
       .from("tickets")
       .select("id")
       .eq("client_chat_id", chatId)
@@ -291,6 +293,7 @@ async function createTicketsFromQueuedMessages(
       .limit(1)
       .maybeSingle();
     if (duplicateError) throw new Error(`Supabase duplicate ticket query failed: ${duplicateError.message}`);
+    const duplicateTicket = duplicateTicketData as { id: string } | null;
     if (duplicateTicket?.id) {
       console.log("duplicate-batch-prevented", { chatId, ticketId: duplicateTicket.id });
       continue;
@@ -298,7 +301,7 @@ async function createTicketsFromQueuedMessages(
 
     const latestMessage = unprocessedMessages[unprocessedMessages.length - 1];
     if (!latestMessage) continue;
-    const { data: createdTicket, error: createTicketError } = await supabase
+    const { data: createdTicketData, error: createTicketError } = await supabase
       .from("tickets")
       .insert({
         ticket_code: createTicketCode(),
@@ -318,6 +321,7 @@ async function createTicketsFromQueuedMessages(
       })
       .select("id, intent, client_chat_id, client_original_message, extracted_data, internal_summary, created_at, holding_message_id")
       .single();
+    const createdTicket = createdTicketData as BatchTicket | null;
     if (createTicketError || !createdTicket?.id) {
       throw new Error(`Supabase tickets insert failed: ${createTicketError?.message ?? "Unknown error"}`);
     }
