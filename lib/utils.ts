@@ -8,6 +8,7 @@ export function cn(...inputs: ClassValue[]) {
 export function formatDate(value?: string | null) {
   if (!value) return "Unknown";
   return new Intl.DateTimeFormat("en", {
+    timeZone: "Asia/Jerusalem",
     dateStyle: "medium",
     timeStyle: "short"
   }).format(new Date(value));

@@ -24,6 +24,7 @@ const SHEET_HEADERS = [
 ];
 
 const STATUS_OPTIONS = ["Pending", "In Progress", "Waiting Client", "Completed", "Rejected"];
+const LOCAL_TIME_ZONE = "Asia/Jerusalem";
 
 const CATEGORY_COLORS: Record<string, { red: number; green: number; blue: number }> = {
   Share: { red: 0.18, green: 0.42, blue: 0.78 },
@@ -124,6 +125,37 @@ function firstAccountFromAction(action: SheetAction | undefined): string | null 
   return action?.account ?? action?.accounts?.[0] ?? null;
 }
 
+function accountsFromAction(action: SheetAction | undefined): string | null {
+  if (!action) return null;
+  if (Array.isArray(action.accounts) && action.accounts.length > 0) return action.accounts.join(", ");
+  return action.account ?? null;
+}
+
+function formatBm(value: string | undefined): string | null {
+  if (!value) return null;
+  return value.toUpperCase() === "ALL BMS" ? "all BMs" : value;
+}
+
+function formatLocalDateTime(value: Date): { date: string; time: string } {
+  const parts = new Intl.DateTimeFormat("en-CA", {
+    timeZone: LOCAL_TIME_ZONE,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hour12: false,
+    hourCycle: "h23"
+  }).formatToParts(value);
+  const part = (type: string) => parts.find((item) => item.type === type)?.value ?? "";
+
+  return {
+    date: `${part("year")}-${part("month")}-${part("day")}`,
+    time: `${part("hour")}:${part("minute")}:${part("second")}`
+  };
+}
+
 function generateParsedSummary(
   intent: string,
   originalMessage: string,
@@ -146,17 +178,17 @@ function generateParsedSummary(
     return amount ? `Deposit check request for ${amount}` : "Deposit check request";
   }
   if (category === "Share") {
-    const actionAccount = firstAccountFromAction(shareAction) ?? account;
-    const actionBm = shareAction?.bm ?? bm;
+    const actionAccount = accountsFromAction(shareAction) ?? account;
+    const actionBm = formatBm(shareAction?.bm) ?? bm;
     if (actionAccount && actionBm) return `Share account ${actionAccount} to BM ${actionBm}`;
     if (actionAccount) return `Share account ${actionAccount}`;
     return "Share account request";
   }
   if (category === "Unshare") {
-    const actionAccount = firstAccountFromAction(unshareAction) ?? account;
-    const actionBm = unshareAction?.bm ?? bm;
-    if (actionAccount && actionBm) return `Unshare account ${actionAccount} from BM ${actionBm}`;
-    if (actionAccount) return `Unshare account ${actionAccount}`;
+    const actionAccount = accountsFromAction(unshareAction) ?? account;
+    const actionBm = formatBm(unshareAction?.bm) ?? bm;
+    if (actionAccount && actionBm) return `Unshare accounts ${actionAccount} from ${actionBm}`;
+    if (actionAccount) return `Unshare accounts ${actionAccount}`;
     return "Unshare account request";
   }
   if (category === "Payment Issues") {
@@ -384,8 +416,7 @@ export async function writeClientRequestRowToGoogleSheet(input: WriteClientReque
     await ensureSheetTabReady(sheets, spreadsheetId, tabName);
 
     const now = input.now ?? new Date();
-    const date = now.toISOString().slice(0, 10);
-    const time = now.toTimeString().slice(0, 8);
+    const { date, time } = formatLocalDateTime(now);
     const parsedSummary = generateParsedSummary(input.intent, input.originalMessage, input.parsedMessage, input.extractedData);
     console.log("google-sheets-summary-generated", { tab: tabName, category, parsedSummary });
 

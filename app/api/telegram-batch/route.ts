@@ -14,14 +14,17 @@ type QueuedMessage = {
   message_type: string | null;
   raw_payload: {
     message?: {
+      date?: number;
       chat?: { id?: number; title?: string };
       from?: { username?: string };
     };
     edited_message?: {
+      date?: number;
       chat?: { id?: number; title?: string };
       from?: { username?: string };
     };
     channel_post?: {
+      date?: number;
       chat?: { id?: number; title?: string };
       from?: { username?: string };
     };
@@ -84,6 +87,15 @@ function compactText(value: string): string {
   return value.replace(/\s+/g, " ").trim();
 }
 
+function preserveBatchText(value: string): string {
+  return value
+    .split(/\r?\n/)
+    .map((line) => line.replace(/[ \t]+/g, " ").trim())
+    .join("\n")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+}
+
 function normalizeComparableText(text: string): string {
   return compactText(text).toLowerCase().replace(/[!?.,]+$/g, "");
 }
@@ -137,6 +149,30 @@ function firstAccount(action: SheetAction | undefined): string | null {
   return action?.account ?? action?.accounts?.[0] ?? null;
 }
 
+function accountsText(action: SheetAction | undefined): string | null {
+  if (!action) return null;
+  if (Array.isArray(action.accounts) && action.accounts.length > 0) return action.accounts.join(", ");
+  return action.account ?? null;
+}
+
+function formatBm(value: string | undefined): string | null {
+  if (!value) return null;
+  return value.toUpperCase() === "ALL BMS" ? "all BMs" : value;
+}
+
+function actionTypeToIntent(action: SheetAction): string {
+  if (action.type === "share_account") return "share_ad_account";
+  if (action.type === "unshare_account") return "unshare_ad_account";
+  if (action.type === "payment_check") return "deposit_funds";
+  if (action.type === "verify_account") return "verify_account";
+  if (action.type === "account_status_check") return "check_account_status";
+  return "general_support";
+}
+
+function actionToCategory(action: SheetAction): typeof CATEGORY_ORDER[number] {
+  return mapIntentToCategory(actionTypeToIntent(action));
+}
+
 function extractAmount(text: string): string | null {
   const match = text.match(/(?:\$|usd\s*)?\d+(?:[,.]\d+)?\s*(?:k|K)?\s*(?:usdt|usd|dollars?|\$)?/i);
   return match?.[0] ? compactText(match[0]).replace(/\s+/g, "") : null;
@@ -160,7 +196,7 @@ function cleanTaskText(ticket: BatchTicket): string {
 
   if (category === "Share") {
     const account = firstAccount(shareAction) ?? extractEntityAfter(original, ["account", "accounts", "acc", "ad account", "ad accounts"]);
-    const bm = shareAction?.bm ?? extractEntityAfter(original, ["bm", "business manager"]);
+    const bm = formatBm(shareAction?.bm) ?? extractEntityAfter(original, ["bm", "business manager"]);
     if (account && bm) return `share account ${account} to BM ${bm}`;
     if (account) return `share account ${account}`;
   }
@@ -168,7 +204,7 @@ function cleanTaskText(ticket: BatchTicket): string {
   if (category === "Unshare") {
     const accounts = unshareAction?.accounts?.length ? unshareAction.accounts.join(", ") : null;
     const account = accounts ?? firstAccount(unshareAction) ?? extractEntityAfter(original, ["account", "accounts", "acc", "ad account", "ad accounts"]);
-    const bm = unshareAction?.bm ?? extractEntityAfter(original, ["bm", "business manager"]);
+    const bm = formatBm(unshareAction?.bm) ?? extractEntityAfter(original, ["bm", "business manager"]);
     if (account && bm) return `unshare accounts ${account} from ${bm}`;
     if (account) return `unshare accounts ${account}`;
   }
@@ -201,10 +237,50 @@ function cleanTaskText(ticket: BatchTicket): string {
   return original || "General support request";
 }
 
+function cleanActionTaskText(ticket: BatchTicket, action: SheetAction): string {
+  const original = compactText(ticket.client_original_message ?? "");
+  const accounts = accountsText(action);
+
+  if (action.type === "share_account") {
+    const bm = formatBm(action.bm);
+    if (accounts && bm) return `share account ${accounts} to BM ${bm}`;
+    if (accounts) return `share account ${accounts}`;
+    return original || "share account request";
+  }
+
+  if (action.type === "unshare_account") {
+    const bm = formatBm(action.bm);
+    if (accounts && bm) return `unshare accounts ${accounts} from ${bm}`;
+    if (accounts) return `unshare accounts ${accounts}`;
+    return original || "unshare account request";
+  }
+
+  if (action.type === "payment_check") {
+    return action.amount ? `sent ${action.amount}, please check` : "deposit sent, please check";
+  }
+
+  if (action.type === "verify_account") {
+    return accounts ? `verify account ${accounts}` : "verification request";
+  }
+
+  if (action.type === "account_status_check") {
+    return accounts ? `account issue on account ${accounts}` : "account issue reported";
+  }
+
+  return original || "General support request";
+}
+
 function buildMarkSummary(tickets: BatchTicket[]): string {
   const grouped = new Map<typeof CATEGORY_ORDER[number], string[]>();
   for (const category of CATEGORY_ORDER) grouped.set(category, []);
-  for (const ticket of tickets) grouped.get(mapIntentToCategory(ticket.intent))?.push(cleanTaskText(ticket));
+  for (const ticket of tickets) {
+    const actions = getActions(ticket.extracted_data);
+    if (actions.length > 0) {
+      for (const action of actions) grouped.get(actionToCategory(action))?.push(cleanActionTaskText(ticket, action));
+    } else {
+      grouped.get(mapIntentToCategory(ticket.intent))?.push(cleanTaskText(ticket));
+    }
+  }
 
   const headings: Record<typeof CATEGORY_ORDER[number], string> = {
     Share: "SHARE REQUESTS",
@@ -242,6 +318,15 @@ function escapeTelegramHtml(value: string): string {
 
 function getTelegramMessage(update: QueuedMessage["raw_payload"]) {
   return update?.message ?? update?.edited_message ?? update?.channel_post ?? null;
+}
+
+function getTelegramMessageDate(message: QueuedMessage): Date {
+  const telegramDate = getTelegramMessage(message.raw_payload)?.date;
+  if (typeof telegramDate === "number" && Number.isFinite(telegramDate)) {
+    return new Date(telegramDate * 1000);
+  }
+
+  return message.created_at ? new Date(message.created_at) : new Date();
 }
 
 function getChatTitle(message: QueuedMessage): string {
@@ -335,11 +420,11 @@ async function createTicketsFromQueuedMessages(
 
     const cleanMessages = unprocessedMessages
       .sort((a, b) => new Date(a.created_at ?? 0).getTime() - new Date(b.created_at ?? 0).getTime())
-      .map((message) => compactText(message.message_text ?? ""))
+      .map((message) => preserveBatchText(message.message_text ?? ""))
       .filter((text) => text && !isPureNonSupportChatter(text));
-    const groupedText = compactText(cleanMessages.join(" "));
+    const groupedText = preserveBatchText(cleanMessages.join("\n"));
 
-    if (!groupedText || !hasRequestSignal(groupedText)) {
+    if (!groupedText) {
       console.log("non-request-message-skipped", { chatId, messageCount: unprocessedMessages.length });
       const messageTexts = unprocessedMessages.map((message) => compactText(message.message_text ?? "")).filter(Boolean);
       if (messageTexts.some(isGreetingText)) {
@@ -351,6 +436,10 @@ async function createTicketsFromQueuedMessages(
         await markChatBatchProcessed(supabase, chatId, "batch_non_request_skipped", "non-support chatter skipped");
       }
       continue;
+    }
+
+    if (!hasRequestSignal(groupedText)) {
+      console.log("unclear-batch-forwarded-as-general", { chatId, messageCount: unprocessedMessages.length });
     }
 
     if (isIncompleteRequestFragment(groupedText)) {
@@ -385,6 +474,7 @@ async function createTicketsFromQueuedMessages(
 
     const latestMessage = unprocessedMessages[unprocessedMessages.length - 1];
     if (!latestMessage) continue;
+    const messageTime = getTelegramMessageDate(latestMessage);
     const { data: createdTicketData, error: createTicketError } = await supabase
       .from("tickets")
       .insert({
@@ -401,7 +491,9 @@ async function createTicketsFromQueuedMessages(
         extracted_data: classification.extractedData,
         internal_summary: classification.internalSummary,
         holding_message_id: null,
-        internal_message_id: null
+        internal_message_id: null,
+        created_at: messageTime.toISOString(),
+        updated_at: messageTime.toISOString()
       })
       .select("id, intent, client_chat_id, client_original_message, extracted_data, internal_summary, created_at")
       .single();
@@ -411,15 +503,22 @@ async function createTicketsFromQueuedMessages(
     }
 
     try {
-      await writeClientRequestRowToGoogleSheet({
-        telegramGroup: getChatTitle(latestMessage),
-        username: getUsername(latestMessage),
-        originalMessage: groupedText,
-        parsedMessage: classification.internalSummary || groupedText,
-        intent: classification.intent,
-        status: "Pending",
-        extractedData: classification.extractedData
-      });
+      const sheetActions = getActions(classification.extractedData);
+      const sheetRows = sheetActions.length > 0 ? sheetActions : [null];
+
+      for (const action of sheetRows) {
+        const extractedData = action ? { ...classification.extractedData, actions: [action] } : classification.extractedData;
+        await writeClientRequestRowToGoogleSheet({
+          telegramGroup: getChatTitle(latestMessage),
+          username: getUsername(latestMessage),
+          originalMessage: groupedText,
+          parsedMessage: action ? cleanActionTaskText(createdTicket, action) : classification.internalSummary || groupedText,
+          intent: action ? actionTypeToIntent(action) : classification.intent,
+          status: "Pending",
+          extractedData,
+          now: messageTime
+        });
+      }
       console.log("google-sheets-row-write-success", { chatId, ticketId: createdTicket.id });
     } catch (error) {
       console.log("google-sheets-write-failed", {

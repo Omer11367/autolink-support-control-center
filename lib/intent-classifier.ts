@@ -327,16 +327,22 @@ function readTokenValuesUntilStop(tokens: string[], startIndex: number, stopWord
     index += 1;
   }
 
-  return values.filter((value) => !["account", "accounts", "acc", "accs", "ad", "this", "these", "those"].includes(value.toLowerCase()));
+  return values.filter((value) => !["account", "accounts", "acc", "accs", "ad", "this", "these", "those", "all", "of"].includes(value.toLowerCase()));
 }
 
 function extractAccountsFromActionSegment(segment: string, actionType: "share_account" | "unshare_account"): string[] {
+  if (actionType === "unshare_account") {
+    const fromAllBms = segment.match(/\bfrom\s+(?:all\s+)?(?:bms?|business\s+managers?|all)\b[:\s-]*([\s\S]*)/i);
+    const valuesAfterAllBms = fromAllBms?.[1]?.match(/[A-Za-z0-9_-]{5,}/g) ?? [];
+    if (valuesAfterAllBms.length > 0) return uniqueStrings(valuesAfterAllBms.map(cleanEntityToken).filter(Boolean));
+  }
+
   const looseUnshare = actionType === "unshare_account"
     ? segment.match(/\b(?:unshare|unsher|remove|disconnect|unlink|revoke|take\s+out)\b\s+(?:this|these|those)?\s*([\s\S]*?)(?:\bfrom\b|$)/i)
     : null;
   if (looseUnshare?.[1]) {
     const values = looseUnshare[1].match(/[A-Za-z0-9_-]+/g) ?? [];
-    const cleanValues = values.filter((value) => !["account", "accounts", "acc", "ad", "this", "these", "those"].includes(value.toLowerCase()));
+    const cleanValues = values.filter((value) => !["account", "accounts", "acc", "ad", "this", "these", "those", "all", "of"].includes(value.toLowerCase()));
     if (cleanValues.length > 0) return uniqueStrings(cleanValues);
   }
 

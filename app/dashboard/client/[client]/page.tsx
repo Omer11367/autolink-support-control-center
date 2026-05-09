@@ -24,7 +24,7 @@ type PageProps = {
 
 function formatDate(value: string | null) {
   if (!value) return "No activity";
-  return new Intl.DateTimeFormat("en", { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" }).format(new Date(value));
+  return new Intl.DateTimeFormat("en", { timeZone: "Asia/Jerusalem", month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" }).format(new Date(value));
 }
 
 function Metric({ label, value, helper }: { label: string; value: string | number; helper?: string }) {

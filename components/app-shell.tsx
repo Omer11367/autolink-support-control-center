@@ -21,6 +21,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
 
   useEffect(() => {
     setTimestamp(new Intl.DateTimeFormat("en", {
+      timeZone: "Asia/Jerusalem",
       dateStyle: "medium",
       timeStyle: "short"
     }).format(new Date()));
