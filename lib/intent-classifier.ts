@@ -115,6 +115,31 @@ const RULES: IntentRule[] = [
     note: "Never decide policy automatically."
   },
   {
+    intent: "site_issue",
+    phrases: [
+      "site is down",
+      "site down",
+      "website down",
+      "site not working",
+      "website not working",
+      "cant load",
+      "cannot load",
+      "doesnt load",
+      "doesn't load",
+      "not loading",
+      "page not loading",
+      "cant open",
+      "cannot open",
+      "cant access",
+      "cannot access",
+      "not accessible",
+      "cant see the site",
+      "link not working",
+      "link is down"
+    ],
+    completionOptions: ["Handled"]
+  },
+  {
     intent: "payment_issue",
     phrases: [
       "debt",

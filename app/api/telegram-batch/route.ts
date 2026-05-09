@@ -140,6 +140,7 @@ function mapIntentToCategory(intent: string | null | undefined): typeof CATEGORY
   if (["payment_issue", "refund_request"].includes(normalized)) return "Payment Issues";
   if (["verify_account"].includes(normalized)) return "Verification";
   if (["check_account_status", "request_data_banned_accounts", "check_policy"].includes(normalized)) return "Account Issues";
+  if (["site_issue"].includes(normalized)) return "General";
   return "General";
 }
 
@@ -240,6 +241,9 @@ function cleanTaskText(ticket: BatchTicket): string {
     return account ? `account issue on account ${account}` : "account issue reported";
   }
 
+  if (/\b(site|website|page)\b.*\b(down|load|work|access|open)\b|\b(cant|cannot|doesn?t|not)\b.*\b(load|open|access|see|work)\b/i.test(original)) {
+    return "site is down / client cannot load the site";
+  }
   if (/\b(available|availability|stock)\b/i.test(original)) return "asked if accounts are available";
   return original || "General support request";
 }
@@ -314,10 +318,12 @@ function buildMarkSummary(tickets: BatchTicket[]): string {
 
 function chooseClientReply(tickets: BatchTicket[]): string {
   const categories = tickets.map((ticket) => mapIntentToCategory(ticket.intent));
+  const intents = tickets.map((ticket) => ticket.intent ?? "");
   if (categories.includes("Deposits")) return "Understood, I'll check the deposit and update you.";
   if (categories.includes("Payment Issues")) return "Got it, I'll check the payment issue and update you.";
   if (categories.includes("Share") || categories.includes("Unshare")) return "Sure, I'll check this and update you.";
   if (categories.includes("Verification")) return "Got it, checking the verification request now.";
+  if (intents.some((i) => i === "site_issue")) return "Got it, we're looking into this and will update you shortly.";
   return USE_CLEAN_CLIENT_BATCH_REPLY ? CLEAN_CLIENT_BATCH_REPLY : CLIENT_BATCH_REPLY;
 }
 
@@ -392,7 +398,8 @@ async function markChatBatchProcessed(
   });
 }
 
-type CreateTicketsResult = { tickets: BatchTicket[]; eligibleFound: number; processedCount: number };
+type DepositLinkUpdate = { chatTitle: string; url: string; ticketId: string };
+type CreateTicketsResult = { tickets: BatchTicket[]; eligibleFound: number; processedCount: number; depositLinkUpdates: DepositLinkUpdate[] };
 
 async function createTicketsFromQueuedMessages(
   supabase: SupabaseAdminClient,
@@ -406,6 +413,7 @@ async function createTicketsFromQueuedMessages(
   }
 
   const createdTickets: BatchTicket[] = [];
+  const depositLinkUpdates: DepositLinkUpdate[] = [];
   let eligibleFound = 0;
   let processedCount = 0;
   for (const [chatId, chatMessages] of messagesByChat.entries()) {
@@ -490,7 +498,7 @@ async function createTicketsFromQueuedMessages(
       const recentDepositStart = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
       const { data: openDepositData, error: openDepositError } = await supabase
         .from("tickets")
-        .select("id, client_original_message")
+        .select("id, client_original_message, internal_message_id")
         .eq("client_chat_id", chatId)
         .eq("intent", "deposit_funds")
         .in("status", ["open", "new", "waiting_mark", "waiting_for_mark"])
@@ -499,15 +507,19 @@ async function createTicketsFromQueuedMessages(
         .limit(1)
         .maybeSingle();
       if (openDepositError) throw new Error(`Supabase open deposit query failed: ${openDepositError.message}`);
-      const openDeposit = openDepositData as { id: string; client_original_message: string | null } | null;
+      const openDeposit = openDepositData as { id: string; client_original_message: string | null; internal_message_id: string | number | null } | null;
       if (openDeposit?.id) {
-        // Append any new info (e.g. Etherscan link) not already in the existing ticket.
         const existingText = openDeposit.client_original_message ?? "";
         const newUrl = extractFirstUrl(groupedText);
         if (newUrl && !existingText.includes(newUrl)) {
           const merged = preserveBatchText(`${existingText}\n${newUrl}`);
           await supabase.from("tickets").update({ client_original_message: merged, updated_at: new Date().toISOString() }).eq("id", openDeposit.id);
           console.log("deposit-ticket-merged-with-link", { chatId, ticketId: openDeposit.id, newUrl });
+          // If the ticket was already sent to Mark, queue a follow-up notification so Mark sees the link.
+          if (openDeposit.internal_message_id && newUrl) {
+            const latestMessageForTitle = sortedUnprocessed[sortedUnprocessed.length - 1];
+            depositLinkUpdates.push({ chatTitle: latestMessageForTitle ? getChatTitle(latestMessageForTitle) : chatId, url: newUrl, ticketId: openDeposit.id });
+          }
         }
         console.log("duplicate-deposit-skipped", { chatId, existingTicketId: openDeposit.id });
         await markChatBatchProcessed(supabase, chatId, "batch_duplicate_skipped", `deposit follow-up merged into ticket: ${openDeposit.id}`, null, lastMessageMs);
@@ -594,7 +606,7 @@ async function createTicketsFromQueuedMessages(
     createdTickets.push(createdTicket as BatchTicket);
   }
 
-  return { tickets: createdTickets, eligibleFound, processedCount };
+  return { tickets: createdTickets, eligibleFound, processedCount, depositLinkUpdates };
 }
 
 async function handleBatch(request: Request) {
@@ -633,8 +645,8 @@ async function handleBatch(request: Request) {
   const queuedFound = queuedMessages.length;
   console.log("mark-batch-queued-found", { queuedFound });
 
-  const { tickets: createdTickets, eligibleFound, processedCount } = await createTicketsFromQueuedMessages(supabase, queuedMessages);
-  console.log("mark-batch-create-result", { queuedFound, eligibleFound, processedCount });
+  const { tickets: createdTickets, eligibleFound, processedCount, depositLinkUpdates } = await createTicketsFromQueuedMessages(supabase, queuedMessages);
+  console.log("mark-batch-create-result", { queuedFound, eligibleFound, processedCount, depositLinkUpdates: depositLinkUpdates.length });
 
   const { data, error } = await supabase
     .from("tickets")
@@ -655,8 +667,14 @@ async function handleBatch(request: Request) {
   ];
   console.log("mark-batch-found-requests", { queuedFound, eligibleFound, processedCount, sentToMark: tickets.length });
   if (tickets.length === 0) {
+    // Still send deposit link follow-ups even when there are no new tickets.
+    for (const update of depositLinkUpdates) {
+      const updateText = `\u{1F517} Deposit link received\n${escapeTelegramHtml(update.chatTitle)}: ${update.url}`;
+      await maybeSendTelegramMessage({ chatId: markGroupChatId, text: updateText, source: "telegram_batch" });
+      console.log("deposit-link-update-sent-to-mark", { ticketId: update.ticketId, url: update.url });
+    }
     console.log("mark-batch-no-requests");
-    return NextResponse.json({ ok: true, count: 0, queuedFound, eligibleFound, processedCount, sentToMark: 0, clientRepliesSent: 0 });
+    return NextResponse.json({ ok: true, count: 0, queuedFound, eligibleFound, processedCount, sentToMark: 0, clientRepliesSent: 0, depositLinkUpdates: depositLinkUpdates.length });
   }
 
   console.log("mark-batch-ready", { count: tickets.length });
@@ -674,6 +692,13 @@ async function handleBatch(request: Request) {
     response_type: "batch_mark_summary",
     response_text: markSummary
   });
+
+  // Send follow-up notifications for deposit links that arrived after the original ticket was sent.
+  for (const update of depositLinkUpdates) {
+    const updateText = `\u{1F517} Deposit link received\n${escapeTelegramHtml(update.chatTitle)}: ${update.url}`;
+    await maybeSendTelegramMessage({ chatId: markGroupChatId, text: updateText, source: "telegram_batch" });
+    console.log("deposit-link-update-sent-to-mark", { ticketId: update.ticketId, url: update.url });
+  }
 
   const ticketsByClient = new Map<string, BatchTicket[]>();
   for (const ticket of tickets) {
@@ -730,8 +755,8 @@ async function handleBatch(request: Request) {
     console.log("mark-batch-request-marked-sent", { ticketId: ticket.id });
   }
 
-  console.log("mark-batch-complete", { queuedFound, eligibleFound, processedCount, sentToMark: tickets.length, clientRepliesSent: clientReplyCount });
-  return NextResponse.json({ ok: true, count: tickets.length, queuedFound, eligibleFound, processedCount, sentToMark: tickets.length, clientRepliesSent: clientReplyCount });
+  console.log("mark-batch-complete", { queuedFound, eligibleFound, processedCount, sentToMark: tickets.length, clientRepliesSent: clientReplyCount, depositLinkUpdates: depositLinkUpdates.length });
+  return NextResponse.json({ ok: true, count: tickets.length, queuedFound, eligibleFound, processedCount, sentToMark: tickets.length, clientRepliesSent: clientReplyCount, depositLinkUpdates: depositLinkUpdates.length });
 }
 
 export async function GET(request: Request) {
