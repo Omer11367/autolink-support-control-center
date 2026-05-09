@@ -473,7 +473,7 @@ async function findFollowUpContext(
 ): Promise<LinkedFollowUpContext | null> {
   const replyTo = messages.map(getReplyToMessage).find((reply): reply is TelegramReplyToMessage => Boolean(reply?.message_id));
   const replyToTelegramMessageId = replyTo?.message_id ?? null;
-  const replyToText = getReplyText(replyTo);
+  const replyToText = getReplyText(replyTo ?? null);
   const hasFollowUpSignal = isFollowUpText(groupedText);
   if (!replyToTelegramMessageId && !hasFollowUpSignal) return null;
 
