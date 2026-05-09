@@ -1,0 +1,17 @@
+{
+  "permissions": {
+    "allow": [
+      "PowerShell(npx skills add https://github.com/juliusbrussee/caveman --skill caveman)",
+      "Read(//usr/local/bin/**)",
+      "Read(//c/Users/LIRON/.nvm/versions/**)",
+      "Read(//usr/bin/**)",
+      "PowerShell($url = \"https://nodejs.org/dist/v22.15.0/node-v22.15.0-x64.msi\"; $out = \"$env:TEMP\\\\node-installer.msi\"; Write-Output \"Downloading Node.js LTS...\"; Invoke-WebRequest -Uri $url -OutFile $out -UseBasicParsing; Write-Output \"Download complete: $out\")",
+      "PowerShell($env:PATH = \"C:\\\\Program Files\\\\nodejs;\" + $env:PATH; node --version; npx --version)",
+      "Bash(npx tsc *)",
+      "Bash(git add *)",
+      "Bash(git commit -m ' *)",
+      "Bash(git commit *)",
+      "Bash(git push *)"
+    ]
+  }
+}
