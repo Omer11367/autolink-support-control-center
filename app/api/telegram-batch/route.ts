@@ -87,6 +87,11 @@ function compactText(value: string): string {
   return value.replace(/\s+/g, " ").trim();
 }
 
+function extractFirstUrl(text: string): string | null {
+  const match = text.match(/https?:\/\/\S+/);
+  return match?.[0]?.replace(/[.,)>]+$/, "") ?? null;
+}
+
 function preserveBatchText(value: string): string {
   return value
     .split(/\r?\n/)
@@ -114,7 +119,7 @@ function isGreetingText(text: string): boolean {
 
 function hasRequestSignal(text: string): boolean {
   const normalized = normalizeComparableText(text);
-  return /\b(share|unshare|remove|bm|account|deposit|sent|paid|payment|funds|usdt|usd|verify|verification|disabled|restricted|failed|issue|problem|check|status|availability|replacement|replace|limit|spending|spend|need|request|refund|business|support)\b|\$|\d/.test(normalized);
+  return /\b(share|unshare|remove|bm|account|deposit|sent|paid|payment|funds|usdt|usd|verify|verification|disabled|restricted|failed|issue|problem|check|status|availability|replacement|replace|limit|spending|spend|need|request|refund|business|support|down|site|load|loading|access|open|work|working|error|cant|cannot|doesnt|not\s+working)\b|https?:\/\/|\$|\d/.test(normalized);
 }
 
 function isIncompleteRequestFragment(text: string): boolean {
@@ -211,7 +216,9 @@ function cleanTaskText(ticket: BatchTicket): string {
 
   if (category === "Deposits") {
     const amount = paymentAction?.amount ?? extractAmount(original);
-    return amount ? `sent ${amount}, please check` : "deposit sent, please check";
+    const url = extractFirstUrl(original);
+    const base = amount ? `sent ${amount}, please check` : "deposit sent, please check";
+    return url ? `${base}: ${url}` : base;
   }
 
   if (category === "Payment Issues") {
@@ -256,7 +263,9 @@ function cleanActionTaskText(ticket: BatchTicket, action: SheetAction): string {
   }
 
   if (action.type === "payment_check") {
-    return action.amount ? `sent ${action.amount}, please check` : "deposit sent, please check";
+    const url = extractFirstUrl(original);
+    const base = action.amount ? `sent ${action.amount}, please check` : "deposit sent, please check";
+    return url ? `${base}: ${url}` : base;
   }
 
   if (action.type === "verify_account") {
@@ -349,14 +358,20 @@ function chooseGreetingReply(messages: QueuedMessage[]): string {
 async function getLastBatchMarkerMs(supabase: SupabaseAdminClient, chatId: string): Promise<number> {
   const { data, error } = await supabase
     .from("bot_responses")
-    .select("created_at")
+    .select("created_at, response_text")
     .eq("telegram_chat_id", chatId)
     .in("response_type", BATCH_MARKER_TYPES)
     .order("created_at", { ascending: false })
     .limit(1)
     .maybeSingle();
   if (error) throw new Error(`Supabase batch marker query failed: ${error.message}`);
-  return data?.created_at ? new Date(data.created_at).getTime() : 0;
+  if (!data?.created_at) return 0;
+  // Prefer the stored last-message timestamp (message time) over the row insertion time.
+  // The insertion time can be minutes ahead of the actual messages, causing those messages
+  // to be excluded from the next batch.
+  const msgMsMatch = (data.response_text ?? "").match(/\|lastMsgMs:(\d+)/);
+  if (msgMsMatch?.[1]) return parseInt(msgMsMatch[1], 10);
+  return new Date(data.created_at).getTime();
 }
 
 async function markChatBatchProcessed(
@@ -364,21 +379,25 @@ async function markChatBatchProcessed(
   chatId: string,
   responseType: BatchMarkerType,
   responseText: string,
-  telegramMessageId: number | null = null
+  telegramMessageId: number | null = null,
+  lastMessageMs: number = 0
 ) {
+  const storedText = lastMessageMs > 0 ? `${responseText}|lastMsgMs:${lastMessageMs}` : responseText;
   await supabase.from("bot_responses").insert({
     ticket_id: null,
     telegram_chat_id: chatId,
     telegram_message_id: telegramMessageId,
     response_type: responseType,
-    response_text: responseText
+    response_text: storedText
   });
 }
+
+type CreateTicketsResult = { tickets: BatchTicket[]; eligibleFound: number; processedCount: number };
 
 async function createTicketsFromQueuedMessages(
   supabase: SupabaseAdminClient,
   messages: QueuedMessage[]
-): Promise<BatchTicket[]> {
+): Promise<CreateTicketsResult> {
   const messagesByChat = new Map<string, QueuedMessage[]>();
   for (const message of messages) {
     if (!message.telegram_chat_id) continue;
@@ -387,6 +406,8 @@ async function createTicketsFromQueuedMessages(
   }
 
   const createdTickets: BatchTicket[] = [];
+  let eligibleFound = 0;
+  let processedCount = 0;
   for (const [chatId, chatMessages] of messagesByChat.entries()) {
     const { data: latestTicketData, error: latestTicketError } = await supabase
       .from("tickets")
@@ -417,9 +438,16 @@ async function createTicketsFromQueuedMessages(
       return createdAtMs > processedThroughMs;
     });
     if (unprocessedMessages.length === 0) continue;
+    eligibleFound += unprocessedMessages.length;
 
-    const cleanMessages = unprocessedMessages
-      .sort((a, b) => new Date(a.created_at ?? 0).getTime() - new Date(b.created_at ?? 0).getTime())
+    const sortedUnprocessed = unprocessedMessages.sort(
+      (a, b) => new Date(a.created_at ?? 0).getTime() - new Date(b.created_at ?? 0).getTime()
+    );
+    const lastMessageMs = Math.max(
+      ...sortedUnprocessed.map((m) => (m.created_at ? new Date(m.created_at).getTime() : 0))
+    );
+
+    const cleanMessages = sortedUnprocessed
       .map((message) => preserveBatchText(message.message_text ?? ""))
       .filter((text) => text && !isPureNonSupportChatter(text));
     const groupedText = preserveBatchText(cleanMessages.join("\n"));
@@ -430,10 +458,10 @@ async function createTicketsFromQueuedMessages(
       if (messageTexts.some(isGreetingText)) {
         const reply = chooseGreetingReply(unprocessedMessages);
         const greetingResult = await maybeSendTelegramMessage({ chatId, text: reply, source: "telegram_batch" });
-        await markChatBatchProcessed(supabase, chatId, "batch_client_greeting", reply, greetingResult.telegramMessageId);
+        await markChatBatchProcessed(supabase, chatId, "batch_client_greeting", reply, greetingResult.telegramMessageId, lastMessageMs);
         console.log("client-greeting-sent", { chatId, messageCount: unprocessedMessages.length });
       } else {
-        await markChatBatchProcessed(supabase, chatId, "batch_non_request_skipped", "non-support chatter skipped");
+        await markChatBatchProcessed(supabase, chatId, "batch_non_request_skipped", "non-support chatter skipped", null, lastMessageMs);
       }
       continue;
     }
@@ -451,8 +479,40 @@ async function createTicketsFromQueuedMessages(
     const classification = classifyIntent(groupedText);
     if (!classification.requiresMark || classification.intent === "no_action") {
       console.log("non-request-message-skipped", { chatId, intent: classification.intent });
-      await markChatBatchProcessed(supabase, chatId, "batch_non_request_skipped", "no-action batch skipped");
+      await markChatBatchProcessed(supabase, chatId, "batch_non_request_skipped", "no-action batch skipped", null, lastMessageMs);
       continue;
+    }
+
+    // Deposit deduplication: if there is already an open deposit ticket for this chat
+    // from the last 24 hours, the new message is likely a follow-up proof (e.g. Etherscan
+    // link sent as a separate message). Append the new text to that ticket and skip.
+    if (classification.intent === "deposit_funds") {
+      const recentDepositStart = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
+      const { data: openDepositData, error: openDepositError } = await supabase
+        .from("tickets")
+        .select("id, client_original_message")
+        .eq("client_chat_id", chatId)
+        .eq("intent", "deposit_funds")
+        .in("status", ["open", "new", "waiting_mark", "waiting_for_mark"])
+        .gte("created_at", recentDepositStart)
+        .order("created_at", { ascending: false })
+        .limit(1)
+        .maybeSingle();
+      if (openDepositError) throw new Error(`Supabase open deposit query failed: ${openDepositError.message}`);
+      const openDeposit = openDepositData as { id: string; client_original_message: string | null } | null;
+      if (openDeposit?.id) {
+        // Append any new info (e.g. Etherscan link) not already in the existing ticket.
+        const existingText = openDeposit.client_original_message ?? "";
+        const newUrl = extractFirstUrl(groupedText);
+        if (newUrl && !existingText.includes(newUrl)) {
+          const merged = preserveBatchText(`${existingText}\n${newUrl}`);
+          await supabase.from("tickets").update({ client_original_message: merged, updated_at: new Date().toISOString() }).eq("id", openDeposit.id);
+          console.log("deposit-ticket-merged-with-link", { chatId, ticketId: openDeposit.id, newUrl });
+        }
+        console.log("duplicate-deposit-skipped", { chatId, existingTicketId: openDeposit.id });
+        await markChatBatchProcessed(supabase, chatId, "batch_duplicate_skipped", `deposit follow-up merged into ticket: ${openDeposit.id}`, null, lastMessageMs);
+        continue;
+      }
     }
 
     const duplicateStartIso = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
@@ -468,7 +528,7 @@ async function createTicketsFromQueuedMessages(
     const duplicateTicket = duplicateTicketData as { id: string } | null;
     if (duplicateTicket?.id) {
       console.log("duplicate-batch-prevented", { chatId, ticketId: duplicateTicket.id });
-      await markChatBatchProcessed(supabase, chatId, "batch_duplicate_skipped", `duplicate ticket skipped: ${duplicateTicket.id}`);
+      await markChatBatchProcessed(supabase, chatId, "batch_duplicate_skipped", `duplicate ticket skipped: ${duplicateTicket.id}`, null, lastMessageMs);
       continue;
     }
 
@@ -530,10 +590,11 @@ async function createTicketsFromQueuedMessages(
 
     console.log("request-added-to-mark-batch", { chatId, ticketId: createdTicket.id, intent: classification.intent });
     console.log("client-ack-scheduled", { chatId, ticketId: createdTicket.id });
+    processedCount += 1;
     createdTickets.push(createdTicket as BatchTicket);
   }
 
-  return createdTickets;
+  return { tickets: createdTickets, eligibleFound, processedCount };
 }
 
 async function handleBatch(request: Request) {
@@ -568,7 +629,12 @@ async function handleBatch(request: Request) {
     .limit(500);
   if (queuedMessagesError) throw new Error(`Supabase queued messages query failed: ${queuedMessagesError.message}`);
 
-  const createdTickets = await createTicketsFromQueuedMessages(supabase, (queuedMessagesData ?? []) as unknown as QueuedMessage[]);
+  const queuedMessages = (queuedMessagesData ?? []) as unknown as QueuedMessage[];
+  const queuedFound = queuedMessages.length;
+  console.log("mark-batch-queued-found", { queuedFound });
+
+  const { tickets: createdTickets, eligibleFound, processedCount } = await createTicketsFromQueuedMessages(supabase, queuedMessages);
+  console.log("mark-batch-create-result", { queuedFound, eligibleFound, processedCount });
 
   const { data, error } = await supabase
     .from("tickets")
@@ -587,10 +653,10 @@ async function handleBatch(request: Request) {
     ...createdTickets,
     ...pendingTickets.filter((ticket) => !seenTicketIds.has(ticket.id))
   ];
-  console.log("mark-batch-found-requests", { count: tickets.length });
+  console.log("mark-batch-found-requests", { queuedFound, eligibleFound, processedCount, sentToMark: tickets.length });
   if (tickets.length === 0) {
     console.log("mark-batch-no-requests");
-    return NextResponse.json({ ok: true, count: 0 });
+    return NextResponse.json({ ok: true, count: 0, queuedFound, eligibleFound, processedCount, sentToMark: 0, clientRepliesSent: 0 });
   }
 
   console.log("mark-batch-ready", { count: tickets.length });
@@ -664,7 +730,8 @@ async function handleBatch(request: Request) {
     console.log("mark-batch-request-marked-sent", { ticketId: ticket.id });
   }
 
-  return NextResponse.json({ ok: true, count: tickets.length, clientGroups: clientReplyCount });
+  console.log("mark-batch-complete", { queuedFound, eligibleFound, processedCount, sentToMark: tickets.length, clientRepliesSent: clientReplyCount });
+  return NextResponse.json({ ok: true, count: tickets.length, queuedFound, eligibleFound, processedCount, sentToMark: tickets.length, clientRepliesSent: clientReplyCount });
 }
 
 export async function GET(request: Request) {
