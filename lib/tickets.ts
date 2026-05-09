@@ -20,6 +20,44 @@ export type ClientOption = {
   label: string;
 };
 
+export type ClientCard = {
+  client: string;
+  label: string;
+  openRequests: number;
+  urgentRequests: number;
+  waitingMark: number;
+  depositsToday: number;
+  shareRequests: number;
+  unshareRequests: number;
+  lastActivity: string | null;
+  latestMessage: string | null;
+};
+
+export type ClientCategorySummary = {
+  key: string;
+  label: string;
+  count: number;
+  pendingCount: number;
+  urgentCount: number;
+  latestActivity: string | null;
+};
+
+export type ClientOperations = {
+  client: { id: string; label: string };
+  tickets: Ticket[];
+  visibleTickets: Ticket[];
+  categories: ClientCategorySummary[];
+  metrics: {
+    totalRequests: number;
+    activeRequests: number;
+    waitingMark: number;
+    deposits: number;
+    urgentIssues: number;
+    lastActivity: string | null;
+    averageResponseMinutes: number | null;
+  };
+};
+
 function getDateBounds(filters: TicketFilters): { start?: string; end?: string } {
   const now = new Date();
   const selected = filters.date ?? "lifetime";
@@ -58,6 +96,48 @@ function readChatTitle(rawPayload: unknown): string | null {
   if (!chat || typeof chat !== "object" || Array.isArray(chat)) return null;
   const title = (chat as { title?: unknown }).title;
   return typeof title === "string" && title.trim() ? title : null;
+}
+
+function intentCategory(intent: string | null | undefined): string {
+  const value = String(intent ?? "");
+  if (["share_ad_account", "transfer_ad_account"].includes(value)) return "share";
+  if (value === "unshare_ad_account") return "unshare";
+  if (value === "deposit_funds") return "deposits";
+  if (["payment_issue", "refund_request"].includes(value)) return "payment_issues";
+  if (value === "verify_account") return "verification";
+  if (["check_account_status", "request_data_banned_accounts", "check_policy"].includes(value)) return "account_issues";
+  if (value === "get_spend_report") return "reports";
+  return "general";
+}
+
+const CLIENT_CATEGORY_LABELS: Record<string, string> = {
+  share: "Share Accounts",
+  unshare: "Unshare Accounts",
+  deposits: "Deposits",
+  payment_issues: "Payment Issues",
+  general: "General Questions",
+  verification: "Verification",
+  account_issues: "Account Issues",
+  reports: "Reports"
+};
+
+function readActions(data: unknown): Array<{ type?: string; account?: string; accounts?: string[]; bm?: string }> {
+  if (!data || typeof data !== "object" || Array.isArray(data)) return [];
+  const actions = (data as { actions?: unknown }).actions;
+  return Array.isArray(actions) ? actions.filter((item): item is { type?: string; account?: string; accounts?: string[]; bm?: string } => Boolean(item) && typeof item === "object") : [];
+}
+
+function ticketSearchHaystack(ticket: Ticket): string {
+  const actions = readActions(ticket.extracted_data);
+  return [
+    ticket.client_username,
+    ticket.client_original_message,
+    ticket.internal_summary,
+    ticket.status,
+    ticket.priority,
+    ticket.intent,
+    ...actions.flatMap((action) => [action.account, action.bm, ...(action.accounts ?? [])])
+  ].filter(Boolean).join(" ").toLowerCase();
 }
 
 function emptyDashboard(): DashboardStats {
@@ -242,6 +322,107 @@ export async function getClientOptions(): Promise<ClientOption[]> {
   return Array.from(options.entries())
     .map(([value, label]) => ({ value, label }))
     .sort((a, b) => a.label.localeCompare(b.label));
+}
+
+export async function getClientCards(): Promise<ClientCard[]> {
+  noStore();
+  if (!hasSupabaseServerEnv()) return [];
+
+  const supabase = createSupabaseAdminClient();
+  const [{ data, error }, clientLabels] = await Promise.all([
+    supabase.from("tickets").select("*").order("created_at", { ascending: false }).limit(1000),
+    getClientLabelMap()
+  ]);
+  if (error) throw new Error(error.message);
+
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+  const groups = new Map<string, Ticket[]>();
+  for (const ticket of (data ?? []) as Ticket[]) {
+    const client = ticket.client_chat_id ? String(ticket.client_chat_id) : "unknown";
+    groups.set(client, [...(groups.get(client) ?? []), ticket]);
+  }
+
+  return Array.from(groups.entries()).map(([client, tickets]) => {
+    const openTickets = tickets.filter((ticket) => isOpenTicketStatus(ticket.status));
+    const latest = tickets[0];
+    return {
+      client,
+      label: clientLabels.get(client) ?? client,
+      openRequests: openTickets.length,
+      urgentRequests: tickets.filter((ticket) => getEscalationState(ticket) === "urgent" || ["high", "urgent"].includes(ticket.priority ?? "")).length,
+      waitingMark: tickets.filter((ticket) => ticket.needs_mark || ["waiting_mark", "waiting_for_mark"].includes(ticket.status ?? "")).length,
+      depositsToday: tickets.filter((ticket) => ticket.intent === "deposit_funds" && new Date(ticket.created_at ?? 0).getTime() >= today.getTime()).length,
+      shareRequests: tickets.filter((ticket) => intentCategory(ticket.intent) === "share").length,
+      unshareRequests: tickets.filter((ticket) => intentCategory(ticket.intent) === "unshare").length,
+      lastActivity: latest?.created_at ?? null,
+      latestMessage: latest?.client_original_message ?? null
+    };
+  }).sort((a, b) => b.openRequests - a.openRequests || a.label.localeCompare(b.label));
+}
+
+export async function getClientOperations(clientId: string, filters: TicketFilters & { category?: string; unresolved?: string; waitingMark?: string; depositsOnly?: string } = {}): Promise<ClientOperations> {
+  noStore();
+  if (!hasSupabaseServerEnv()) {
+    return {
+      client: { id: clientId, label: clientId },
+      tickets: [],
+      visibleTickets: [],
+      categories: Object.entries(CLIENT_CATEGORY_LABELS).map(([key, label]) => ({ key, label, count: 0, pendingCount: 0, urgentCount: 0, latestActivity: null })),
+      metrics: { totalRequests: 0, activeRequests: 0, waitingMark: 0, deposits: 0, urgentIssues: 0, lastActivity: null, averageResponseMinutes: null }
+    };
+  }
+
+  const supabase = createSupabaseAdminClient();
+  const [{ data, error }, clientLabels] = await Promise.all([
+    supabase.from("tickets").select("*").eq("client_chat_id", clientId).order("created_at", { ascending: false }).limit(1000),
+    getClientLabelMap()
+  ]);
+  if (error) throw new Error(error.message);
+
+  const tickets = (data ?? []) as Ticket[];
+  let visibleTickets = tickets;
+  if (filters.category && filters.category !== "all") visibleTickets = visibleTickets.filter((ticket) => intentCategory(ticket.intent) === filters.category);
+  if (filters.status && filters.status !== "all") visibleTickets = visibleTickets.filter((ticket) => ticket.status === filters.status);
+  if (filters.priority && filters.priority !== "all") visibleTickets = visibleTickets.filter((ticket) => ticket.priority === filters.priority);
+  if (filters.unresolved === "1") visibleTickets = visibleTickets.filter((ticket) => !isResolvedTicketStatus(ticket.status));
+  if (filters.waitingMark === "1") visibleTickets = visibleTickets.filter((ticket) => ticket.needs_mark || ["waiting_mark", "waiting_for_mark"].includes(ticket.status ?? ""));
+  if (filters.depositsOnly === "1") visibleTickets = visibleTickets.filter((ticket) => ticket.intent === "deposit_funds");
+  if (filters.search?.trim()) {
+    const term = filters.search.trim().toLowerCase();
+    visibleTickets = visibleTickets.filter((ticket) => ticketSearchHaystack(ticket).includes(term));
+  }
+
+  const categories = Object.entries(CLIENT_CATEGORY_LABELS).map(([key, label]) => {
+    const categoryTickets = tickets.filter((ticket) => intentCategory(ticket.intent) === key);
+    return {
+      key,
+      label,
+      count: categoryTickets.length,
+      pendingCount: categoryTickets.filter((ticket) => isOpenTicketStatus(ticket.status)).length,
+      urgentCount: categoryTickets.filter((ticket) => getEscalationState(ticket) === "urgent" || ["high", "urgent"].includes(ticket.priority ?? "")).length,
+      latestActivity: categoryTickets[0]?.created_at ?? null
+    };
+  });
+
+  const resolvedTickets = tickets.filter((ticket) => isResolvedTicketStatus(ticket.status));
+  const responseDurations = resolvedTickets.map((ticket) => getMinutesBetween(ticket.created_at, ticket.updated_at)).filter((value): value is number => value !== null);
+
+  return {
+    client: { id: clientId, label: clientLabels.get(clientId) ?? clientId },
+    tickets,
+    visibleTickets,
+    categories,
+    metrics: {
+      totalRequests: tickets.length,
+      activeRequests: tickets.filter((ticket) => isOpenTicketStatus(ticket.status)).length,
+      waitingMark: tickets.filter((ticket) => ticket.needs_mark || ["waiting_mark", "waiting_for_mark"].includes(ticket.status ?? "")).length,
+      deposits: tickets.filter((ticket) => ticket.intent === "deposit_funds").length,
+      urgentIssues: tickets.filter((ticket) => getEscalationState(ticket) === "urgent" || ["high", "urgent"].includes(ticket.priority ?? "")).length,
+      lastActivity: tickets[0]?.created_at ?? null,
+      averageResponseMinutes: responseDurations.length ? Math.round(responseDurations.reduce((sum, value) => sum + value, 0) / responseDurations.length) : null
+    }
+  };
 }
 
 export async function getTicketDetail(id: string) {

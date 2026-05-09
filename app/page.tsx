@@ -1,177 +1,94 @@
 import Link from "next/link";
-import { AlertTriangle, CheckCircle2, Clock3, Inbox, Sparkles, Users } from "lucide-react";
+import { AlertTriangle, ArrowUpRight, Clock3, CreditCard, Share2, ShieldAlert, Users } from "lucide-react";
 import { EmptyState } from "@/components/empty-state";
-import { MetricCard } from "@/components/metric-card";
-import { StatusBadge } from "@/components/status-badge";
-import { TicketFilters } from "@/components/ticket-filters";
 import { Card } from "@/components/ui";
-import { formatIntentLabel } from "@/lib/display";
-import { formatDurationMinutes, getEscalationState, getTicketTimerLabel } from "@/lib/operations";
-import { getClientOptions, getDashboardStats } from "@/lib/tickets";
+import { getClientCards } from "@/lib/tickets";
 import { truncate } from "@/lib/utils";
 
 export const dynamic = "force-dynamic";
 
-type DashboardPageProps = {
-  searchParams: {
-    client?: string;
-    date?: string;
-    start?: string;
-    end?: string;
-  };
-};
+function formatDate(value: string | null) {
+  if (!value) return "No activity";
+  return new Intl.DateTimeFormat("en", { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" }).format(new Date(value));
+}
 
-export default async function DashboardPage({ searchParams }: DashboardPageProps) {
-  const [stats, clients] = await Promise.all([
-    getDashboardStats(searchParams),
-    getClientOptions()
-  ]);
+function MiniMetric({ label, value }: { label: string; value: number }) {
+  return (
+    <div className="rounded-md border border-border bg-zinc-950/50 px-3 py-2">
+      <div className="text-[11px] font-medium uppercase text-muted-foreground">{label}</div>
+      <div className="mt-1 text-lg font-bold text-foreground">{value}</div>
+    </div>
+  );
+}
+
+export default async function DashboardPage() {
+  const clients = await getClientCards();
+  const totals = clients.reduce(
+    (sum, client) => ({
+      open: sum.open + client.openRequests,
+      urgent: sum.urgent + client.urgentRequests,
+      waiting: sum.waiting + client.waitingMark,
+      deposits: sum.deposits + client.depositsToday
+    }),
+    { open: 0, urgent: 0, waiting: 0, deposits: 0 }
+  );
 
   return (
     <div className="space-y-5">
-      <header>
-        <h1 className="text-2xl font-bold tracking-normal">Dashboard</h1>
+      <header className="flex flex-col gap-3 md:flex-row md:items-end md:justify-between">
+        <div>
+          <div className="text-xs font-semibold uppercase tracking-[0.18em] text-muted-foreground">Telegram operations CRM</div>
+          <h1 className="mt-2 text-3xl font-bold tracking-normal">Client Operations</h1>
+        </div>
+        <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
+          <MiniMetric label="Open" value={totals.open} />
+          <MiniMetric label="Urgent" value={totals.urgent} />
+          <MiniMetric label="Waiting Mark" value={totals.waiting} />
+          <MiniMetric label="Deposits Today" value={totals.deposits} />
+        </div>
       </header>
 
-      <section className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
-        <MetricCard label="Total Open Tickets" value={stats.totalOpenTickets} icon={Inbox} />
-        <MetricCard label="Resolved Today" value={stats.resolvedToday} icon={CheckCircle2} />
-        <MetricCard label="Tickets Waiting" value={stats.ticketsWaitingOpen} icon={Clock3} helper="Open tickets waiting on Mark" />
-        <MetricCard label="Longest Open Ticket" value={formatDurationMinutes(stats.longestOpenMinutes)} icon={AlertTriangle} />
-      </section>
+      {clients.length === 0 ? (
+        <EmptyState title="No clients yet" description="Client groups appear here after requests are processed." />
+      ) : (
+        <section className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
+          {clients.map((client) => (
+            <Link key={client.client} href={`/dashboard/client/${encodeURIComponent(client.client)}`} className="group block">
+              <Card className="h-full border-zinc-800 bg-zinc-950/70 transition hover:-translate-y-0.5 hover:border-zinc-600 hover:bg-zinc-950">
+                <div className="flex items-start justify-between gap-3">
+                  <div className="min-w-0">
+                    <div className="flex items-center gap-2">
+                      <span className="inline-flex h-9 w-9 items-center justify-center rounded-md bg-zinc-100 text-zinc-950">
+                        <Users className="h-4 w-4" />
+                      </span>
+                      <h2 className="truncate text-lg font-bold">{client.label}</h2>
+                    </div>
+                    <p className="mt-3 text-sm text-muted-foreground">{truncate(client.latestMessage ?? "No message preview yet.", 120)}</p>
+                  </div>
+                  <ArrowUpRight className="h-5 w-5 text-muted-foreground transition group-hover:text-foreground" />
+                </div>
 
-      <section className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
-        <MetricCard label="Total" value={stats.totalTickets} icon={Inbox} />
-        <MetricCard label="New" value={stats.newTickets} icon={Sparkles} />
-        <MetricCard label="Urgent" value={stats.waitingOver30Minutes} icon={AlertTriangle} />
-        <MetricCard
-          label="Avg Resolution"
-          value={formatDurationMinutes(stats.averageResolutionMinutes)}
-          icon={CheckCircle2}
-        />
-      </section>
+                <div className="mt-5 grid grid-cols-3 gap-2">
+                  <MiniMetric label="Open" value={client.openRequests} />
+                  <MiniMetric label="Urgent" value={client.urgentRequests} />
+                  <MiniMetric label="Waiting" value={client.waitingMark} />
+                </div>
 
-      <TicketFilters clients={clients} basePath="/" showTicketFilters={false} />
+                <div className="mt-4 grid grid-cols-3 gap-2 text-xs">
+                  <span className="inline-flex items-center gap-1 rounded-md border border-emerald-500/20 bg-emerald-500/10 px-2 py-1 text-emerald-200"><CreditCard className="h-3 w-3" /> {client.depositsToday} deposits</span>
+                  <span className="inline-flex items-center gap-1 rounded-md border border-blue-500/20 bg-blue-500/10 px-2 py-1 text-blue-200"><Share2 className="h-3 w-3" /> {client.shareRequests} share</span>
+                  <span className="inline-flex items-center gap-1 rounded-md border border-orange-500/20 bg-orange-500/10 px-2 py-1 text-orange-200"><ShieldAlert className="h-3 w-3" /> {client.unshareRequests} unshare</span>
+                </div>
 
-      <Card>
-        <div className="flex items-center justify-between gap-3">
-          <h2 className="text-lg font-bold">Tickets per client</h2>
-          <Users className="h-5 w-5 text-muted-foreground" aria-hidden="true" />
-        </div>
-        {stats.ticketsByClient.length === 0 ? (
-          <p className="mt-3 text-sm text-muted-foreground">No open client tickets.</p>
-        ) : (
-          <div className="mt-4 grid gap-2 md:grid-cols-2 xl:grid-cols-3">
-            {stats.ticketsByClient.map((client) => (
-              <Link
-                key={client.client}
-                href={`/tickets?client=${encodeURIComponent(client.client)}`}
-                className="rounded-md border border-border bg-muted px-3 py-2 transition hover:bg-zinc-800"
-              >
-                <span className="block truncate text-sm font-semibold">{client.label}</span>
-                <span className="text-xs text-muted-foreground">{client.openCount} open</span>
-              </Link>
-            ))}
-          </div>
-        )}
-      </Card>
-
-      <Card className="p-0">
-        <div className="border-b border-border p-4">
-          <h2 className="text-lg font-bold">Attention</h2>
-        </div>
-        {stats.attentionTickets.length === 0 ? (
-          <div className="p-4">
-            <EmptyState title="No tickets need attention" description="Waiting and urgent tickets will appear here." />
-          </div>
-        ) : (
-          <div className="overflow-x-auto">
-            <table className="w-full min-w-[820px] text-left text-sm">
-              <thead className="border-b border-border bg-muted/50 text-xs uppercase text-muted-foreground">
-                <tr>
-                  <th className="px-4 py-3">Ticket</th>
-                  <th className="px-4 py-3">Intent</th>
-                  <th className="px-4 py-3">Status</th>
-                  <th className="px-4 py-3">SLA</th>
-                  <th className="px-4 py-3">Timer</th>
-                  <th className="px-4 py-3">Message</th>
-                  <th className="px-4 py-3">Open</th>
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-border">
-                {stats.attentionTickets.map((ticket) => {
-                  const sla = getEscalationState(ticket);
-                  return (
-                    <tr key={ticket.id} className="hover:bg-muted/60">
-                      <td className="px-4 py-3 font-semibold">{ticket.ticket_code ?? ticket.id.slice(0, 8)}</td>
-                      <td className="px-4 py-3">{formatIntentLabel(ticket.intent)}</td>
-                      <td className="px-4 py-3"><StatusBadge value={ticket.status} /></td>
-                      <td className="px-4 py-3">
-                        {sla === "urgent" ? (
-                          <StatusBadge value="urgent" type="priority" label="Urgent" />
-                        ) : (
-                          <StatusBadge value="waiting_for_mark" label="Needs attention" />
-                        )}
-                      </td>
-                      <td className="px-4 py-3 text-muted-foreground">{getTicketTimerLabel(ticket)}</td>
-                      <td className="max-w-md px-4 py-3 text-muted-foreground">
-                        <span className="block truncate">{truncate(ticket.client_original_message, 120)}</span>
-                      </td>
-                      <td className="px-4 py-3">
-                        <Link className="font-semibold text-primary hover:underline" href={`/tickets/${ticket.id}`}>
-                          Open
-                        </Link>
-                      </td>
-                    </tr>
-                  );
-                })}
-              </tbody>
-            </table>
-          </div>
-        )}
-      </Card>
-
-      <Card className="p-0">
-        <div className="border-b border-border p-4">
-          <h2 className="text-lg font-bold">Recent tickets</h2>
-        </div>
-        {stats.recentTickets.length === 0 ? (
-          <div className="p-4">
-            <EmptyState title="No recent tickets" description="New Telegram tickets will appear here after refresh." />
-          </div>
-        ) : (
-          <div className="overflow-x-auto">
-            <table className="w-full min-w-[760px] text-left text-sm">
-              <thead className="border-b border-border bg-muted/50 text-xs uppercase text-muted-foreground">
-                <tr>
-                  <th className="px-4 py-3">Ticket</th>
-                  <th className="px-4 py-3">Intent</th>
-                  <th className="px-4 py-3">Status</th>
-                  <th className="px-4 py-3">Message</th>
-                  <th className="px-4 py-3">Open</th>
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-border">
-                {stats.recentTickets.map((ticket) => (
-                  <tr key={ticket.id} className="hover:bg-muted/60">
-                    <td className="px-4 py-3 font-semibold">{ticket.ticket_code ?? ticket.id.slice(0, 8)}</td>
-                    <td className="px-4 py-3">{formatIntentLabel(ticket.intent)}</td>
-                    <td className="px-4 py-3"><StatusBadge value={ticket.status} /></td>
-                    <td className="max-w-md px-4 py-3 text-muted-foreground">
-                      <span className="block truncate">{truncate(ticket.client_original_message, 120)}</span>
-                    </td>
-                    <td className="px-4 py-3">
-                      <Link className="font-semibold text-primary hover:underline" href={`/tickets/${ticket.id}`}>
-                        Open
-                      </Link>
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        )}
-      </Card>
+                <div className="mt-5 flex items-center justify-between border-t border-border pt-3 text-xs text-muted-foreground">
+                  <span className="inline-flex items-center gap-1"><Clock3 className="h-3 w-3" /> {formatDate(client.lastActivity)}</span>
+                  {client.urgentRequests > 0 ? <span className="inline-flex items-center gap-1 text-red-200"><AlertTriangle className="h-3 w-3" /> action needed</span> : <span>steady</span>}
+                </div>
+              </Card>
+            </Link>
+          ))}
+        </section>
+      )}
     </div>
   );
 }
