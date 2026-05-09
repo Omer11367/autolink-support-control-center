@@ -117,7 +117,7 @@ const CLIENT_CATEGORY_LABELS: Record<string, string> = {
   payment_issues: "Payment Issues",
   general: "General Questions",
   verification: "Verification",
-  account_issues: "Account Issues",
+  account_issues: "Site / Access Issues",
   reports: "Reports"
 };
 
@@ -125,6 +125,12 @@ function readActions(data: unknown): Array<{ type?: string; account?: string; ac
   if (!data || typeof data !== "object" || Array.isArray(data)) return [];
   const actions = (data as { actions?: unknown }).actions;
   return Array.isArray(actions) ? actions.filter((item): item is { type?: string; account?: string; accounts?: string[]; bm?: string } => Boolean(item) && typeof item === "object") : [];
+}
+
+function readExtractedText(data: unknown, key: string): string | null {
+  if (!data || typeof data !== "object" || Array.isArray(data)) return null;
+  const value = (data as Record<string, unknown>)[key];
+  return typeof value === "string" && value.trim() ? value.trim() : null;
 }
 
 function ticketSearchHaystack(ticket: Ticket): string {
@@ -136,6 +142,9 @@ function ticketSearchHaystack(ticket: Ticket): string {
     ticket.status,
     ticket.priority,
     ticket.intent,
+    readExtractedText(ticket.extracted_data, "followUpMessage"),
+    readExtractedText(ticket.extracted_data, "linkedOriginalSummary"),
+    readExtractedText(ticket.extracted_data, "linkedOriginalMessage"),
     ...actions.flatMap((action) => [action.account, action.bm, ...(action.accounts ?? [])])
   ].filter(Boolean).join(" ").toLowerCase();
 }

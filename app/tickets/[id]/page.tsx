@@ -191,6 +191,8 @@ export default async function TicketDetailPage({ params }: { params: { id: strin
     ? shareEntities.adAccountIds.join(", ")
     : readExtractedValue(ticket.extracted_data, ["adAccountIds", "accountIds", "ad_account_ids"]);
   const amountValue = readExtractedValue(ticket.extracted_data, ["amountOrPayment", "amount", "payment"]);
+  const followUpMessage = readExtractedValue(ticket.extracted_data, ["followUpMessage"]);
+  const linkedOriginalSummary = readExtractedValue(ticket.extracted_data, ["linkedOriginalSummary", "linkedOriginalMessage", "replyToMessageText"]);
   const storedActions = readDetectedActions(ticket.extracted_data);
   const fallbackActions: DetectedAction[] = [];
 
@@ -254,6 +256,18 @@ export default async function TicketDetailPage({ params }: { params: { id: strin
                 <dt className="text-muted-foreground">User id</dt>
                 <dd className="font-medium">{ticket.client_user_id ?? "Missing"}</dd>
               </div>
+              {followUpMessage ? (
+                <div>
+                  <dt className="text-muted-foreground">Follow-up message</dt>
+                  <dd className="font-medium">{followUpMessage}</dd>
+                </div>
+              ) : null}
+              {linkedOriginalSummary ? (
+                <div>
+                  <dt className="text-muted-foreground">Linked original context</dt>
+                  <dd className="font-medium">{linkedOriginalSummary}</dd>
+                </div>
+              ) : null}
             </dl>
           </Card>
 

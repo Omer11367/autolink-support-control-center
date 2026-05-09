@@ -121,6 +121,11 @@ function getSheetActions(extractedData: Record<string, unknown> | undefined): Sh
   return actions.filter((action): action is SheetAction => Boolean(action) && typeof action === "object");
 }
 
+function getExtractedText(extractedData: Record<string, unknown> | undefined, key: string): string | null {
+  const value = extractedData?.[key];
+  return typeof value === "string" && value.trim() ? value.trim() : null;
+}
+
 function firstAccountFromAction(action: SheetAction | undefined): string | null {
   return action?.account ?? action?.accounts?.[0] ?? null;
 }
@@ -165,6 +170,8 @@ function generateParsedSummary(
   const category = mapIntentToCategory(intent);
   const message = originalMessage.trim();
   const actions = getSheetActions(extractedData);
+  const followUpMessage = getExtractedText(extractedData, "followUpMessage");
+  const linkedOriginalSummary = getExtractedText(extractedData, "linkedOriginalSummary");
   const shareAction = actions.find((action) => action.type === "share_account");
   const unshareAction = actions.find((action) => action.type === "unshare_account");
   const paymentAction = actions.find((action) => action.type === "payment_check");
@@ -173,6 +180,10 @@ function generateParsedSummary(
   const account = extractEntityAfter(message, ["account", "accounts", "acc", "ad account", "ad accounts"]);
   const bm = extractEntityAfter(message, ["bm", "business manager"]);
   const amount = paymentAction?.amount ?? extractAmount(message);
+
+  if (followUpMessage && linkedOriginalSummary) {
+    return `${followUpMessage.replace(/[?!.]+$/g, "")} on: ${linkedOriginalSummary}`;
+  }
 
   if (category === "Deposits") {
     return amount ? `Deposit check request for ${amount}` : "Deposit check request";

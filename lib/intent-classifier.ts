@@ -629,7 +629,10 @@ export function classifyIntent(message: string, previousContext = ""): Classifie
   const actions = detectActions(combined, intent, amount);
 
   const extractedData: Record<string, unknown> = {
-    actions
+    actions,
+    accessLevel,
+    ...(amount ? { amount } : {}),
+    ...(reportRange ? { reportRange } : {})
   };
 
   const confidence = best ? (best.score > 1 ? "high" : "medium") : "low";

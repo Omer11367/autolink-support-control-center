@@ -5,6 +5,7 @@ import { Card, Input, Select } from "@/components/ui";
 import { formatIntentLabel } from "@/lib/display";
 import { formatDurationMinutes, getTicketTimerLabel } from "@/lib/operations";
 import { getClientOperations } from "@/lib/tickets";
+import type { Ticket } from "@/lib/types";
 import { truncate } from "@/lib/utils";
 
 export const dynamic = "force-dynamic";
@@ -37,15 +38,163 @@ function Metric({ label, value, helper }: { label: string; value: string | numbe
   );
 }
 
-function readActions(data: unknown): Array<{ account?: string; accounts?: string[]; bm?: string }> {
-  if (!data || typeof data !== "object" || Array.isArray(data)) return [];
-  const actions = (data as { actions?: unknown }).actions;
-  return Array.isArray(actions) ? actions.filter((item): item is { account?: string; accounts?: string[]; bm?: string } => Boolean(item) && typeof item === "object") : [];
+type DetailField = {
+  label: string;
+  value: string | null;
+};
+
+type DetectedAction = {
+  type?: string;
+  account?: string;
+  accounts?: string[];
+  bm?: string;
+  amount?: string;
+};
+
+function readExtractedData(data: unknown): Record<string, unknown> {
+  if (!data || typeof data !== "object" || Array.isArray(data)) return {};
+  return data as Record<string, unknown>;
 }
 
-function entityLine(data: unknown, key: "account" | "bm") {
-  const values = readActions(data).flatMap((action) => key === "bm" ? [action.bm] : [action.account, ...(action.accounts ?? [])]).filter(Boolean);
-  return values.length ? Array.from(new Set(values)).join(", ") : "None detected";
+function readExtractedText(data: unknown, keys: string[]): string | null {
+  const record = readExtractedData(data);
+  for (const key of keys) {
+    const value = record[key];
+    if (typeof value === "string" && value.trim()) return value.trim();
+    if (typeof value === "number") return String(value);
+  }
+  return null;
+}
+
+function readActions(data: unknown): DetectedAction[] {
+  if (!data || typeof data !== "object" || Array.isArray(data)) return [];
+  const actions = (data as { actions?: unknown }).actions;
+  return Array.isArray(actions) ? actions.filter((item): item is DetectedAction => Boolean(item) && typeof item === "object") : [];
+}
+
+function uniqueValues(values: Array<string | null | undefined>): string | null {
+  const clean = values.map((value) => value?.trim()).filter((value): value is string => Boolean(value));
+  return clean.length ? Array.from(new Set(clean)).join(", ") : null;
+}
+
+function actionAccounts(actions: DetectedAction[]): string | null {
+  return uniqueValues(actions.flatMap((action) => [action.account, ...(action.accounts ?? [])]));
+}
+
+function actionBm(actions: DetectedAction[]): string | null {
+  const bm = uniqueValues(actions.map((action) => action.bm));
+  return bm?.toUpperCase() === "ALL BMS" ? "all BMs" : bm;
+}
+
+function firstActionAmount(actions: DetectedAction[]): string | null {
+  return actions.find((action) => action.amount)?.amount ?? null;
+}
+
+function extractAmountFromText(text: string): string | null {
+  return text.match(/(?:\$|usd\s*)?\d+(?:[,.]\d+)?\s*(?:k|K)?\s*(?:usdt|usd|dollars?|\$)?/i)?.[0]?.trim() ?? null;
+}
+
+function extractCurrency(value: string | null): string | null {
+  if (!value) return null;
+  if (/usdt/i.test(value)) return "USDT";
+  if (/\$|usd|dollars?/i.test(value)) return "USD";
+  return null;
+}
+
+function extractTransactionReference(text: string): string | null {
+  const link = text.match(/https?:\/\/\S+/i)?.[0]?.replace(/[).,]+$/g, "");
+  if (link) return link;
+  return text.match(/\b(?:0x)?[A-Fa-f0-9]{32,}\b/)?.[0] ?? null;
+}
+
+function inferProblem(text: string): string | null {
+  const match = text.match(/\b(?:failed|declined|rejected|disabled|restricted|blocked|cannot pay|can't pay|card problem|payment issue|error[:\s-]*[^.]+)/i);
+  return match?.[0] ?? null;
+}
+
+function inferRequiredAction(ticket: Ticket): string | null {
+  if (ticket.needs_mark || ["waiting_mark", "waiting_for_mark"].includes(ticket.status ?? "")) return "Mark review needed";
+  if (ticket.status === "resolved") return "Resolved";
+  return null;
+}
+
+function ticketCategory(intent: string | null | undefined): string {
+  const value = String(intent ?? "");
+  if (["share_ad_account", "transfer_ad_account"].includes(value)) return "share";
+  if (value === "unshare_ad_account") return "unshare";
+  if (value === "deposit_funds") return "deposits";
+  if (["payment_issue", "refund_request"].includes(value)) return "payment_issues";
+  if (["check_account_status", "request_data_banned_accounts", "check_policy", "verify_account"].includes(value)) return "site_access";
+  return "general";
+}
+
+function compactFieldText(value: string | null, max = 120): string | null {
+  if (!value) return null;
+  return value.length > max ? `${value.slice(0, max - 1)}...` : value;
+}
+
+function buildDetailFields(ticket: Ticket): DetailField[] {
+  const data = ticket.extracted_data;
+  const actions = readActions(data);
+  const message = ticket.client_original_message ?? "";
+  const context = readExtractedText(data, ["linkedOriginalSummary", "linkedOriginalMessage", "replyToMessageText"]);
+  const followUp = readExtractedText(data, ["followUpMessage"]);
+  const accounts = actionAccounts(actions) ?? readExtractedText(data, ["adAccountIds", "accountIds", "account"]);
+  const bm = actionBm(actions) ?? readExtractedText(data, ["bmIds", "bmId", "bm"]);
+  const amount = firstActionAmount(actions) ?? readExtractedText(data, ["amount", "amountOrPayment", "payment"]) ?? extractAmountFromText(message);
+  const category = ticketCategory(ticket.intent);
+  const commonTimeline = getTicketTimerLabel(ticket);
+  const notes = "Open ticket for notes";
+
+  const fieldsByCategory: Record<string, DetailField[]> = {
+    share: [
+      { label: "Account IDs", value: accounts },
+      { label: "BM ID", value: bm },
+      { label: "Access level", value: readExtractedText(data, ["accessLevel", "access_level"]) },
+      { label: "Mark status", value: ticket.needs_mark ? "Waiting Mark" : "No Mark needed" },
+      { label: "Timeline", value: commonTimeline },
+      { label: "Notes", value: notes }
+    ],
+    unshare: [
+      { label: "Account IDs", value: accounts },
+      { label: "BM / from BM", value: bm },
+      { label: "Mark status", value: ticket.needs_mark ? "Waiting Mark" : "No Mark needed" },
+      { label: "Timeline", value: commonTimeline },
+      { label: "Notes", value: notes }
+    ],
+    deposits: [
+      { label: "Amount", value: amount },
+      { label: "Currency", value: extractCurrency(amount ?? message) },
+      { label: "Transaction link/hash", value: extractTransactionReference(message) },
+      { label: "Confirmation status", value: ticket.status ?? null },
+      { label: "Timeline", value: commonTimeline },
+      { label: "Notes", value: notes }
+    ],
+    payment_issues: [
+      { label: "Account/card/payment method", value: accounts ?? (/\bcard\b/i.test(message) ? "Card" : null) ?? (/\bpayment method\b/i.test(message) ? "Payment method" : null) },
+      { label: "Error/problem", value: inferProblem(message) ?? compactFieldText(ticket.internal_summary, 140) },
+      { label: "Required action", value: inferRequiredAction(ticket) },
+      { label: "Timeline", value: commonTimeline },
+      { label: "Notes", value: notes }
+    ],
+    general: [
+      { label: "Question/topic", value: followUp ?? compactFieldText(message, 120) },
+      { label: "Related context", value: compactFieldText(context, 160) },
+      { label: "Mark status", value: ticket.needs_mark ? "Waiting Mark" : null },
+      { label: "Timeline", value: commonTimeline },
+      { label: "Notes", value: notes }
+    ],
+    site_access: [
+      { label: "Site/system affected", value: accounts ?? bm ?? readExtractedText(data, ["system", "site", "domain"]) },
+      { label: "Error description", value: inferProblem(message) ?? compactFieldText(ticket.internal_summary, 140) },
+      { label: "Urgency", value: ticket.priority ?? null },
+      { label: "Timeline", value: commonTimeline },
+      { label: "Notes", value: notes }
+    ]
+  };
+
+  const fields = fieldsByCategory[category] ?? fieldsByCategory.general;
+  return fields.filter((field) => field.value && field.value !== "not_specified");
 }
 
 export default async function ClientOperationsPage({ params, searchParams }: PageProps) {
@@ -138,30 +287,40 @@ export default async function ClientOperationsPage({ params, searchParams }: Pag
       </Card>
 
       <section className="space-y-3">
-        {data.visibleTickets.map((ticket) => (
-          <Card key={ticket.id} className="bg-zinc-950/70">
-            <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
-              <div className="min-w-0">
-                <div className="flex flex-wrap items-center gap-2">
-                  <StatusBadge value={ticket.status} />
-                  <StatusBadge value={ticket.priority ?? "normal"} type="priority" />
-                  <StatusBadge value={ticket.intent ?? "unknown"} type="neutral" label={formatIntentLabel(ticket.intent)} />
+        {data.visibleTickets.map((ticket) => {
+          const detailFields = buildDetailFields(ticket);
+          const followUpMessage = readExtractedText(ticket.extracted_data, ["followUpMessage"]);
+          const linkedContext = readExtractedText(ticket.extracted_data, ["linkedOriginalSummary", "linkedOriginalMessage"]);
+
+          return (
+            <Card key={ticket.id} className="bg-zinc-950/70">
+              <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
+                <div className="min-w-0">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <StatusBadge value={ticket.status} />
+                    <StatusBadge value={ticket.priority ?? "normal"} type="priority" />
+                    <StatusBadge value={ticket.intent ?? "unknown"} type="neutral" label={formatIntentLabel(ticket.intent)} />
+                  </div>
+                  <p className="mt-3 text-sm text-muted-foreground">{formatDate(ticket.created_at)} | @{ticket.client_username ?? "unknown"}</p>
+                  <h3 className="mt-2 text-base font-semibold">{truncate(followUpMessage ? `Follow-up: ${followUpMessage}` : (ticket.client_original_message ?? "No original message"), 220)}</h3>
+                  {linkedContext ? <p className="mt-2 text-sm text-muted-foreground">{truncate(`Original: ${linkedContext}`, 260)}</p> : null}
+                  <p className="mt-2 text-sm text-muted-foreground">{truncate(ticket.internal_summary ?? "No AI summary", 260)}</p>
                 </div>
-                <p className="mt-3 text-sm text-muted-foreground">{formatDate(ticket.created_at)} | @{ticket.client_username ?? "unknown"}</p>
-                <h3 className="mt-2 text-base font-semibold">{truncate(ticket.client_original_message ?? "No original message", 220)}</h3>
-                <p className="mt-2 text-sm text-muted-foreground">{truncate(ticket.internal_summary ?? "No AI summary", 260)}</p>
+                <Link className="shrink-0 rounded-md border border-border px-3 py-2 text-sm font-semibold hover:bg-zinc-900" href={`/tickets/${ticket.id}`}>Open ticket</Link>
               </div>
-              <Link className="shrink-0 rounded-md border border-border px-3 py-2 text-sm font-semibold hover:bg-zinc-900" href={`/tickets/${ticket.id}`}>Open ticket</Link>
-            </div>
-            <div className="mt-4 grid gap-2 border-t border-border pt-4 text-sm md:grid-cols-4">
-              <div><div className="text-xs text-muted-foreground">Account IDs</div><div>{entityLine(ticket.extracted_data, "account")}</div></div>
-              <div><div className="text-xs text-muted-foreground">BM IDs</div><div>{entityLine(ticket.extracted_data, "bm")}</div></div>
-              <div><div className="text-xs text-muted-foreground">Mark status</div><div>{ticket.needs_mark ? "Waiting Mark" : "No Mark needed"}</div></div>
-              <div><div className="text-xs text-muted-foreground">Timeline</div><div>{getTicketTimerLabel(ticket)}</div></div>
-              <div><div className="text-xs text-muted-foreground">Notes</div><div>Open ticket for notes</div></div>
-            </div>
-          </Card>
-        ))}
+              {detailFields.length > 0 ? (
+                <div className="mt-4 grid gap-2 border-t border-border pt-4 text-sm md:grid-cols-3 xl:grid-cols-6">
+                  {detailFields.map((field) => (
+                    <div key={field.label}>
+                      <div className="text-xs text-muted-foreground">{field.label}</div>
+                      <div>{field.value}</div>
+                    </div>
+                  ))}
+                </div>
+              ) : null}
+            </Card>
+          );
+        })}
         {data.visibleTickets.length === 0 ? (
           <Card className="text-center text-sm text-muted-foreground">
             No requests match these filters.

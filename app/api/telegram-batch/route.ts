@@ -1,9 +1,16 @@
 import { NextResponse } from "next/server";
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
 import { classifyIntent } from "@/lib/intent-classifier";
+import { formatIntentLabel } from "@/lib/display";
 import { writeClientRequestRowToGoogleSheet } from "@/lib/google-sheets";
 import { maybeSendTelegramMessage } from "@/lib/telegram";
 import type { Database } from "@/lib/supabase/database.types";
+
+type TelegramReplyToMessage = {
+  message_id?: number;
+  text?: string;
+  caption?: string;
+};
 
 type QueuedMessage = {
   id: string;
@@ -17,16 +24,19 @@ type QueuedMessage = {
       date?: number;
       chat?: { id?: number; title?: string };
       from?: { username?: string };
+      reply_to_message?: TelegramReplyToMessage;
     };
     edited_message?: {
       date?: number;
       chat?: { id?: number; title?: string };
       from?: { username?: string };
+      reply_to_message?: TelegramReplyToMessage;
     };
     channel_post?: {
       date?: number;
       chat?: { id?: number; title?: string };
       from?: { username?: string };
+      reply_to_message?: TelegramReplyToMessage;
     };
   } | null;
 };
@@ -35,6 +45,7 @@ type BatchTicket = {
   id: string;
   intent: string | null;
   client_chat_id: string | number | null;
+  client_message_id?: string | number | null;
   client_original_message: string | null;
   extracted_data: unknown;
   internal_summary: string | null;
@@ -53,6 +64,18 @@ type SheetAction = {
 };
 
 type SupabaseAdminClient = SupabaseClient<Database, "public">;
+type Classification = ReturnType<typeof classifyIntent>;
+
+type LinkedFollowUpContext = {
+  linkedTicketId: string | null;
+  linkedClientMessageId: string | number | null;
+  replyToTelegramMessageId: string | number | null;
+  replyToMessageText: string | null;
+  originalMessage: string;
+  originalSummary: string;
+  intent: string;
+  extractedData: Record<string, unknown>;
+};
 
 const CATEGORY_ORDER = ["Share", "Unshare", "Deposits", "Payment Issues", "Verification", "Account Issues", "General"] as const;
 const BATCH_DELAY_MINUTES = 5;
@@ -127,6 +150,15 @@ function isIncompleteRequestFragment(text: string): boolean {
   return false;
 }
 
+function isFollowUpText(text: string): boolean {
+  const normalized = normalizeComparableText(text);
+  return /^(?:any\s+)?updates?$/.test(normalized)
+    || /^(?:what(?:'s| is)\s+the\s+)?status$/.test(normalized)
+    || /^(?:is\s+it\s+)?done$/.test(normalized)
+    || /\b(?:any\s+update|update\??|status\??|done\??)\b/i.test(text)
+    || /\bdid\s+you\s+(?:share|unshare|remove|do|finish|complete)\b/i.test(text);
+}
+
 function mapIntentToCategory(intent: string | null | undefined): typeof CATEGORY_ORDER[number] {
   const normalized = String(intent || "").toLowerCase();
   if (["share_ad_account", "transfer_ad_account"].includes(normalized)) return "Share";
@@ -143,6 +175,16 @@ function getActions(extractedData: unknown): SheetAction[] {
   const actions = (extractedData as { actions?: unknown }).actions;
   if (!Array.isArray(actions)) return [];
   return actions.filter((action): action is SheetAction => Boolean(action) && typeof action === "object");
+}
+
+function extractedObject(extractedData: unknown): Record<string, unknown> {
+  if (!extractedData || typeof extractedData !== "object" || Array.isArray(extractedData)) return {};
+  return extractedData as Record<string, unknown>;
+}
+
+function extractedText(extractedData: unknown, key: string): string | null {
+  const value = extractedObject(extractedData)[key];
+  return typeof value === "string" && value.trim() ? value.trim() : null;
 }
 
 function firstAccount(action: SheetAction | undefined): string | null {
@@ -184,7 +226,23 @@ function extractEntityAfter(text: string, labels: string[]): string | null {
   return match?.[1] ?? null;
 }
 
+function formatFollowUpTask(followUpMessage: string | null, baseText: string, actionType?: string): string {
+  if (!followUpMessage) return baseText;
+
+  const cleanFollowUp = compactText(followUpMessage).replace(/[?!.]+$/g, "");
+  if (!cleanFollowUp) return baseText;
+  if (/\b(?:any\s+)?update|status|done\b/i.test(cleanFollowUp)) return `${cleanFollowUp} on: ${baseText}`;
+  if (actionType === "share_account") return `follow-up on share request: ${baseText}`;
+  if (actionType === "unshare_account") return `follow-up on unshare request: ${baseText}`;
+  if (actionType === "payment_check") return `follow-up on deposit request: ${baseText}`;
+  return `${cleanFollowUp} on: ${baseText}`;
+}
+
 function cleanTaskText(ticket: BatchTicket): string {
+  const followUpMessage = extractedText(ticket.extracted_data, "followUpMessage");
+  const linkedOriginalSummary = extractedText(ticket.extracted_data, "linkedOriginalSummary");
+  if (followUpMessage && linkedOriginalSummary) return formatFollowUpTask(followUpMessage, linkedOriginalSummary);
+
   const category = mapIntentToCategory(ticket.intent);
   const original = compactText(ticket.client_original_message ?? "");
   const actions = getActions(ticket.extracted_data);
@@ -240,34 +298,31 @@ function cleanTaskText(ticket: BatchTicket): string {
 function cleanActionTaskText(ticket: BatchTicket, action: SheetAction): string {
   const original = compactText(ticket.client_original_message ?? "");
   const accounts = accountsText(action);
+  const followUpMessage = extractedText(ticket.extracted_data, "followUpMessage");
+  const linkedOriginalSummary = extractedText(ticket.extracted_data, "linkedOriginalSummary");
+  let baseText: string;
 
   if (action.type === "share_account") {
     const bm = formatBm(action.bm);
-    if (accounts && bm) return `share account ${accounts} to BM ${bm}`;
-    if (accounts) return `share account ${accounts}`;
-    return original || "share account request";
-  }
-
-  if (action.type === "unshare_account") {
+    if (accounts && bm) baseText = `share account ${accounts} to BM ${bm}`;
+    else if (accounts) baseText = `share account ${accounts}`;
+    else baseText = linkedOriginalSummary || original || "share account request";
+  } else if (action.type === "unshare_account") {
     const bm = formatBm(action.bm);
-    if (accounts && bm) return `unshare accounts ${accounts} from ${bm}`;
-    if (accounts) return `unshare accounts ${accounts}`;
-    return original || "unshare account request";
+    if (accounts && bm) baseText = `unshare accounts ${accounts} from ${bm}`;
+    else if (accounts) baseText = `unshare accounts ${accounts}`;
+    else baseText = linkedOriginalSummary || original || "unshare account request";
+  } else if (action.type === "payment_check") {
+    baseText = action.amount ? `sent ${action.amount}, please check` : linkedOriginalSummary || "deposit sent, please check";
+  } else if (action.type === "verify_account") {
+    baseText = accounts ? `verify account ${accounts}` : linkedOriginalSummary || "verification request";
+  } else if (action.type === "account_status_check") {
+    baseText = accounts ? `account issue on account ${accounts}` : linkedOriginalSummary || "account issue reported";
+  } else {
+    baseText = linkedOriginalSummary || original || "General support request";
   }
 
-  if (action.type === "payment_check") {
-    return action.amount ? `sent ${action.amount}, please check` : "deposit sent, please check";
-  }
-
-  if (action.type === "verify_account") {
-    return accounts ? `verify account ${accounts}` : "verification request";
-  }
-
-  if (action.type === "account_status_check") {
-    return accounts ? `account issue on account ${accounts}` : "account issue reported";
-  }
-
-  return original || "General support request";
+  return formatFollowUpTask(followUpMessage, baseText, action.type);
 }
 
 function buildMarkSummary(tickets: BatchTicket[]): string {
@@ -320,6 +375,15 @@ function getTelegramMessage(update: QueuedMessage["raw_payload"]) {
   return update?.message ?? update?.edited_message ?? update?.channel_post ?? null;
 }
 
+function getReplyToMessage(message: QueuedMessage): TelegramReplyToMessage | null {
+  return getTelegramMessage(message.raw_payload)?.reply_to_message ?? null;
+}
+
+function getReplyText(replyToMessage: TelegramReplyToMessage | null): string | null {
+  const value = (replyToMessage?.text ?? replyToMessage?.caption ?? "").trim();
+  return value || null;
+}
+
 function getTelegramMessageDate(message: QueuedMessage): Date {
   const telegramDate = getTelegramMessage(message.raw_payload)?.date;
   if (typeof telegramDate === "number" && Number.isFinite(telegramDate)) {
@@ -344,6 +408,157 @@ function chooseGreetingReply(messages: QueuedMessage[]): string {
   if (/good morning/i.test(text)) return "Good morning, how can I help?";
   if (/good evening|good night/i.test(text)) return "Good evening, how can I help?";
   return "Hi, how can I help?";
+}
+
+function isOpenTicketStatus(status: string | null | undefined): boolean {
+  return ["open", "new", "waiting_mark", "waiting_for_mark"].includes(status ?? "");
+}
+
+function summarizeTicketContext(ticket: BatchTicket): string {
+  const actions = getActions(ticket.extracted_data);
+  if (actions.length > 0) return actions.map((action) => cleanActionTaskText(ticket, action)).join("; ");
+  return cleanTaskText(ticket);
+}
+
+function buildFollowUpTicketMessage(followUpMessage: string, context: LinkedFollowUpContext): string {
+  return [
+    `Follow-up: ${compactText(followUpMessage)}`,
+    `Original context: ${context.originalSummary}`,
+    context.originalMessage ? `Original message: ${compactText(context.originalMessage)}` : ""
+  ].filter(Boolean).join("\n\n");
+}
+
+function withFollowUpContext(classification: Classification, followUpMessage: string, context: LinkedFollowUpContext): Classification {
+  const originalActions = getActions(context.extractedData);
+  const currentData = extractedObject(classification.extractedData);
+  const originalData = extractedObject(context.extractedData);
+  const intent = context.intent || classification.intent || "general_support";
+  const actionSummary = context.originalSummary || context.originalMessage || "original request";
+
+  return {
+    ...classification,
+    intent,
+    humanLabel: formatIntentLabel(intent),
+    confidence: "high",
+    requiresMark: true,
+    shouldReply: true,
+    closeConversation: false,
+    extractedData: {
+      ...currentData,
+      ...originalData,
+      actions: originalActions.length ? originalActions : getActions(classification.extractedData),
+      followUp: true,
+      followUpMessage: compactText(followUpMessage),
+      linkedOriginalSummary: actionSummary,
+      linkedOriginalMessage: context.originalMessage,
+      linkedTicketId: context.linkedTicketId,
+      linkedClientMessageId: context.linkedClientMessageId,
+      replyToTelegramMessageId: context.replyToTelegramMessageId,
+      replyToMessageText: context.replyToMessageText,
+      category: mapIntentToCategory(intent)
+    },
+    internalSummary: `Follow-up: "${compactText(followUpMessage)}". Original context: ${actionSummary}. Detected intent: ${formatIntentLabel(intent)}. Requires Mark: yes.`,
+    matchedRules: [
+      "Follow-up detected from Telegram reply context or existing open client request.",
+      ...(classification.matchedRules ?? [])
+    ]
+  };
+}
+
+async function findFollowUpContext(
+  supabase: SupabaseAdminClient,
+  chatId: string,
+  messages: QueuedMessage[],
+  groupedText: string
+): Promise<LinkedFollowUpContext | null> {
+  const replyTo = messages.map(getReplyToMessage).find((reply): reply is TelegramReplyToMessage => Boolean(reply?.message_id));
+  const replyToTelegramMessageId = replyTo?.message_id ?? null;
+  const replyToText = getReplyText(replyTo);
+  const hasFollowUpSignal = isFollowUpText(groupedText);
+  if (!replyToTelegramMessageId && !hasFollowUpSignal) return null;
+
+  const { data: ticketRows, error: ticketsError } = await supabase
+    .from("tickets")
+    .select("id, intent, client_chat_id, client_message_id, client_original_message, extracted_data, internal_summary, created_at, holding_message_id, status")
+    .eq("client_chat_id", chatId)
+    .order("created_at", { ascending: false })
+    .limit(50);
+  if (ticketsError) throw new Error(`Supabase follow-up ticket lookup failed: ${ticketsError.message}`);
+
+  const tickets = (ticketRows ?? []) as Array<BatchTicket & { status?: string | null }>;
+  let linkedTicket: (BatchTicket & { status?: string | null }) | null = null;
+  let linkedClientMessageId: string | number | null = null;
+  let linkedOriginalMessage = replyToText ?? "";
+
+  if (replyToTelegramMessageId) {
+    const { data: botResponse, error: botResponseError } = await supabase
+      .from("bot_responses")
+      .select("ticket_id, response_text")
+      .eq("telegram_chat_id", chatId)
+      .eq("telegram_message_id", replyToTelegramMessageId)
+      .limit(1)
+      .maybeSingle();
+    if (botResponseError) throw new Error(`Supabase follow-up bot response lookup failed: ${botResponseError.message}`);
+
+    const botTicketId = (botResponse as { ticket_id?: string | null } | null)?.ticket_id;
+    if (botTicketId) {
+      linkedTicket = tickets.find((ticket) => ticket.id === botTicketId) ?? null;
+      if (!linkedTicket) {
+        const { data: ticketById, error: ticketByIdError } = await supabase
+          .from("tickets")
+          .select("id, intent, client_chat_id, client_message_id, client_original_message, extracted_data, internal_summary, created_at, holding_message_id, status")
+          .eq("id", botTicketId)
+          .maybeSingle();
+        if (ticketByIdError) throw new Error(`Supabase follow-up linked ticket lookup failed: ${ticketByIdError.message}`);
+        linkedTicket = ticketById as (BatchTicket & { status?: string | null }) | null;
+      }
+    }
+
+    if (!linkedTicket) {
+      const { data: repliedMessage, error: repliedMessageError } = await supabase
+        .from("messages")
+        .select("id, message_text")
+        .eq("telegram_chat_id", chatId)
+        .eq("telegram_message_id", replyToTelegramMessageId)
+        .limit(1)
+        .maybeSingle();
+      if (repliedMessageError) throw new Error(`Supabase replied message lookup failed: ${repliedMessageError.message}`);
+
+      const repliedRow = repliedMessage as { id?: string | null; message_text?: string | null } | null;
+      linkedClientMessageId = repliedRow?.id ?? null;
+      linkedOriginalMessage = repliedRow?.message_text ?? replyToText ?? "";
+      linkedTicket = linkedClientMessageId
+        ? tickets.find((ticket) => String(ticket.client_message_id ?? "") === String(linkedClientMessageId)) ?? null
+        : null;
+
+      if (!linkedTicket && linkedOriginalMessage) {
+        const normalizedReply = compactText(linkedOriginalMessage).toLowerCase();
+        linkedTicket = tickets.find((ticket) => compactText(ticket.client_original_message ?? "").toLowerCase().includes(normalizedReply)) ?? null;
+      }
+    }
+  }
+
+  if (!linkedTicket && hasFollowUpSignal) {
+    linkedTicket = tickets.find((ticket) => isOpenTicketStatus(ticket.status)) ?? tickets[0] ?? null;
+  }
+
+  if (!linkedTicket && !linkedOriginalMessage) return null;
+
+  const sourceTicket = linkedTicket;
+  const originalMessage = sourceTicket?.client_original_message ?? linkedOriginalMessage;
+  const extractedData = extractedObject(sourceTicket?.extracted_data);
+  const originalSummary = sourceTicket ? summarizeTicketContext(sourceTicket) : compactText(linkedOriginalMessage);
+
+  return {
+    linkedTicketId: sourceTicket?.id ?? null,
+    linkedClientMessageId: sourceTicket?.client_message_id ?? linkedClientMessageId,
+    replyToTelegramMessageId,
+    replyToMessageText: replyToText,
+    originalMessage,
+    originalSummary,
+    intent: sourceTicket?.intent ?? "general_support",
+    extractedData
+  };
 }
 
 async function getLastBatchMarkerMs(supabase: SupabaseAdminClient, chatId: string): Promise<number> {
@@ -448,7 +663,27 @@ async function createTicketsFromQueuedMessages(
     }
 
     console.log("grouped-message-created", { chatId, messageCount: unprocessedMessages.length });
-    const classification = classifyIntent(groupedText);
+    const linkedContext = await findFollowUpContext(supabase, chatId, unprocessedMessages, groupedText);
+    const isLinkedFollowUp = Boolean(linkedContext && isFollowUpText(groupedText));
+    const baseClassification = classifyIntent(groupedText, linkedContext && !isLinkedFollowUp ? linkedContext.originalMessage : "");
+    const classification = linkedContext
+      ? isLinkedFollowUp
+        ? withFollowUpContext(baseClassification, groupedText, linkedContext)
+        : {
+            ...baseClassification,
+            extractedData: {
+              ...extractedObject(baseClassification.extractedData),
+              linkedOriginalSummary: linkedContext.originalSummary,
+              linkedOriginalMessage: linkedContext.originalMessage,
+              linkedTicketId: linkedContext.linkedTicketId,
+              linkedClientMessageId: linkedContext.linkedClientMessageId,
+              replyToTelegramMessageId: linkedContext.replyToTelegramMessageId,
+              replyToMessageText: linkedContext.replyToMessageText
+            },
+            internalSummary: `${baseClassification.internalSummary} Linked context: ${linkedContext.originalSummary}.`
+          }
+      : baseClassification;
+    const storedClientMessage = linkedContext ? buildFollowUpTicketMessage(groupedText, linkedContext) : groupedText;
     if (!classification.requiresMark || classification.intent === "no_action") {
       console.log("non-request-message-skipped", { chatId, intent: classification.intent });
       await markChatBatchProcessed(supabase, chatId, "batch_non_request_skipped", "no-action batch skipped");
@@ -460,7 +695,7 @@ async function createTicketsFromQueuedMessages(
       .from("tickets")
       .select("id")
       .eq("client_chat_id", chatId)
-      .eq("client_original_message", groupedText)
+      .eq("client_original_message", storedClientMessage)
       .gte("created_at", duplicateStartIso)
       .limit(1)
       .maybeSingle();
@@ -487,7 +722,7 @@ async function createTicketsFromQueuedMessages(
         status: "waiting_mark",
         priority: ["deposit_funds", "refund_request", "payment_issue", "check_policy"].includes(classification.intent) ? "high" : "normal",
         needs_mark: true,
-        client_original_message: groupedText,
+        client_original_message: storedClientMessage,
         extracted_data: classification.extractedData,
         internal_summary: classification.internalSummary,
         holding_message_id: null,
@@ -495,7 +730,7 @@ async function createTicketsFromQueuedMessages(
         created_at: messageTime.toISOString(),
         updated_at: messageTime.toISOString()
       })
-      .select("id, intent, client_chat_id, client_original_message, extracted_data, internal_summary, created_at")
+      .select("id, intent, client_chat_id, client_message_id, client_original_message, extracted_data, internal_summary, created_at")
       .single();
     const createdTicket = createdTicketData as BatchTicket | null;
     if (createTicketError || !createdTicket?.id) {
@@ -511,7 +746,7 @@ async function createTicketsFromQueuedMessages(
         await writeClientRequestRowToGoogleSheet({
           telegramGroup: getChatTitle(latestMessage),
           username: getUsername(latestMessage),
-          originalMessage: groupedText,
+          originalMessage: storedClientMessage,
           parsedMessage: action ? cleanActionTaskText(createdTicket, action) : classification.internalSummary || groupedText,
           intent: action ? actionTypeToIntent(action) : classification.intent,
           status: "Pending",

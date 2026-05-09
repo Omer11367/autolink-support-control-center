@@ -17,8 +17,14 @@ type TelegramUser = {
 
 type TelegramMessage = {
   message_id: number;
+  date?: number;
   chat: TelegramChat;
   from?: TelegramUser;
+  reply_to_message?: {
+    message_id?: number;
+    text?: string;
+    caption?: string;
+  };
   text?: string;
   caption?: string;
   photo?: Array<{
@@ -151,7 +157,8 @@ export async function POST(request: Request) {
           telegram_username: message.from?.username ?? null,
           message_text: clientMessageText,
           message_type: hasImageAttachment ? "client_photo" : "client",
-          raw_payload: update
+          raw_payload: update,
+          ...(typeof message.date === "number" ? { created_at: new Date(message.date * 1000).toISOString() } : {})
         })
         .eq("id", existingMessage.id)
         .select("id, created_at, message_text, message_type, telegram_message_id")
@@ -171,7 +178,8 @@ export async function POST(request: Request) {
         telegram_username: message.from?.username ?? null,
         message_text: clientMessageText,
         message_type: hasImageAttachment ? "client_photo" : "client",
-        raw_payload: update
+        raw_payload: update,
+        ...(typeof message.date === "number" ? { created_at: new Date(message.date * 1000).toISOString() } : {})
       })
       .select("id, created_at, message_text, message_type, telegram_message_id")
       .single();
