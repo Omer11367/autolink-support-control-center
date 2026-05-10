@@ -87,6 +87,46 @@ function isEmployeeHoldingAck(text: string): boolean {
   return false;
 }
 
+// Maps an intent string to a broad category label — mirrors the logic in telegram-batch/route.ts
+// but kept local here so the webhook has no dependency on the batch route module.
+function intentToCategory(intent: string | null): string {
+  const n = String(intent ?? "").toLowerCase();
+  if (["share_ad_account", "transfer_ad_account"].includes(n)) return "Share";
+  if (n === "unshare_ad_account") return "Unshare";
+  if (n === "deposit_funds") return "Deposits";
+  if (["payment_issue", "refund_request"].includes(n)) return "Payment Issues";
+  if (n === "verify_account") return "Verification";
+  if (["check_account_status", "request_data_banned_accounts", "check_policy"].includes(n)) return "Account Issues";
+  return "General";
+}
+
+// Decides whether an employee's reply message is relevant to a specific client's tickets.
+// Used when the batch contained requests from multiple clients: routes the reply only to
+// the client(s) whose topic the employee is addressing.
+function isRelevantForClient(
+  employeeLower: string,
+  tickets: Array<{ intent: string | null; chatTitle: string | null }>
+): boolean {
+  // 1. Check if the employee mentioned the client's group name.
+  for (const t of tickets) {
+    const title = (t.chatTitle ?? "").toLowerCase();
+    if (title && employeeLower.includes(title)) return true;
+  }
+
+  // 2. Match by category keywords in the employee's reply.
+  const categories = tickets.map((t) => intentToCategory(t.intent));
+  if (categories.includes("Deposits") && /\b(deposit|funds?|payment|confirmed|wallet|added|money|usdt|usd|transferred|crypto)\b/.test(employeeLower)) return true;
+  if (categories.includes("Share") && /\b(shar(ed?|ing)|access\s+grant(ed)?|added?\s+(to\s+)?bm|link(ed)?|connected)\b/.test(employeeLower)) return true;
+  if (categories.includes("Unshare") && /\b(unshar(ed?|ing)|remov(ed?|ing)|access\s+revok(ed)?|unlink(ed)?)\b/.test(employeeLower)) return true;
+  if (categories.includes("Verification") && /\b(verif(ied|ication)?|card\s+check(ed)?)\b/.test(employeeLower)) return true;
+  if (categories.includes("Payment Issues") && /\b(payment|card|billing|charge|invoice)\b/.test(employeeLower)) return true;
+  if (categories.includes("Account Issues") && /\b(account|disabled|enabled|restor(ed)?|banned|blocked)\b/.test(employeeLower)) return true;
+  // General questions: forward if the reply is a substantive sentence (>15 chars).
+  if (categories.includes("General") && employeeLower.length > 15) return true;
+
+  return false;
+}
+
 export async function GET() {
   return NextResponse.json({
     ok: true,
@@ -121,78 +161,111 @@ export async function POST(request: Request) {
 
     const chatId = message.chat.id;
 
-    // ── Employee reply from Mark's internal group ────────────────────────────────────────────────
-    // When an employee in Mark's group REPLIES to a per-ticket bot message, check if it's a
-    // real answer (e.g. "funds added", "account shared") and forward it to the right client.
-    // Holding acks ("got it", "on it", "we'll check") are silently ignored — the client already
-    // received the bot's auto-acknowledgment when the ticket was created.
+    // ── Employee message from Mark's internal group ──────────────────────────────────────────────
+    // When an employee replies to the batch summary, the bot analyzes their text and forwards
+    // it to the right client group(s).
+    //
+    // How routing works:
+    //  1. Employee must use Telegram's Reply feature on the batch summary message.
+    //  2. The bot looks up all tickets that share that summary's internal_message_id.
+    //  3. Holding acks ("got it", "we'll check", etc.) are ignored — client already has that.
+    //  4. Real answers are matched to the relevant client(s) by category keywords or group name.
+    //  5. The message is forwarded to each matched client group.
     if (String(chatId) === String(markGroupChatId)) {
       const replyToMsgId = message.reply_to_message?.message_id;
 
-      // Only act on replies — standalone messages in Mark's group are ignored.
+      // Only forward replies — standalone messages in Mark's group are ignored.
       if (!replyToMsgId) {
-        console.log("mark-group-non-reply-skipped", { chatId, messageId: message.message_id });
+        console.log("mark-group-non-reply-skipped", { messageId: message.message_id });
         return NextResponse.json({ ok: true, ignored: "mark_group_non_reply" });
       }
 
       const employeeText = (message.text ?? message.caption ?? "").trim();
-
-      // Empty or holding-ack replies are ignored.
-      if (!employeeText || isEmployeeHoldingAck(employeeText)) {
-        console.log("mark-employee-reply-ignored", {
-          messageId: message.message_id,
-          reason: !employeeText ? "empty" : "holding_ack"
-        });
-        return NextResponse.json({ ok: true, ignored: "holding_ack_or_empty" });
+      if (!employeeText) {
+        return NextResponse.json({ ok: true, ignored: "empty" });
       }
 
-      // Find the ticket whose per-ticket Mark message this is a reply to.
-      const { data: matchedTicket, error: ticketError } = await supabase
+      // Holding acks are silently dropped — client already has the bot's auto-ack.
+      if (isEmployeeHoldingAck(employeeText)) {
+        console.log("mark-employee-holding-ack-ignored", { messageId: message.message_id });
+        return NextResponse.json({ ok: true, ignored: "holding_ack" });
+      }
+
+      // Find all tickets from this batch (they all share the same internal_message_id = batch summary msg id).
+      const { data: batchTickets, error: ticketError } = await supabase
         .from("tickets")
-        .select("id, client_chat_id, intent")
+        .select("id, client_chat_id, intent, extracted_data")
         .eq("internal_message_id", replyToMsgId)
-        .limit(1)
-        .maybeSingle();
+        .not("client_chat_id", "is", null);
 
-      if (ticketError || !matchedTicket?.client_chat_id) {
-        console.log("mark-reply-no-ticket", { replyToMsgId, error: ticketError?.message ?? "no match" });
-        return NextResponse.json({ ok: true, ignored: "no_matching_ticket" });
+      if (ticketError || !batchTickets || batchTickets.length === 0) {
+        console.log("mark-reply-no-tickets-found", { replyToMsgId, error: ticketError?.message ?? "no match" });
+        return NextResponse.json({ ok: true, ignored: "no_matching_tickets" });
       }
 
-      // Forward the employee's real answer to the correct client group.
+      // Group tickets by client_chat_id.
+      const byClient = new Map<string, Array<{ id: string; intent: string | null; chatTitle: string | null }>>();
+      for (const t of batchTickets) {
+        const key = String(t.client_chat_id);
+        const chatTitle = (typeof t.extracted_data === "object" && t.extracted_data !== null)
+          ? String((t.extracted_data as Record<string, unknown>).chatTitle ?? "")
+          : "";
+        byClient.set(key, [...(byClient.get(key) ?? []), { id: t.id, intent: t.intent, chatTitle: chatTitle || null }]);
+      }
+
+      // Determine which clients should receive this employee message.
+      // If there is only one client in the batch → always forward.
+      // If multiple → match by category keywords or group name mention.
+      const employeeLower = employeeText.toLowerCase();
+      const clientsToForward: string[] = [];
+
+      if (byClient.size === 1) {
+        clientsToForward.push(...byClient.keys());
+      } else {
+        for (const [clientChatId, clientTickets] of byClient.entries()) {
+          if (isRelevantForClient(employeeLower, clientTickets)) {
+            clientsToForward.push(clientChatId);
+          }
+        }
+        // Fallback: if routing could not determine any specific client, forward to all.
+        if (clientsToForward.length === 0) {
+          console.log("mark-reply-routing-fallback-all-clients", { clientCount: byClient.size });
+          clientsToForward.push(...byClient.keys());
+        }
+      }
+
       const token = process.env.TELEGRAM_BOT_TOKEN?.trim();
       if (!token) {
         console.error("mark-reply-forward-no-token");
         return NextResponse.json({ ok: false, error: "Missing bot token" }, { status: 500 });
       }
 
-      const forwardRes = await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          chat_id: matchedTicket.client_chat_id,
-          text: employeeText,
-          parse_mode: "HTML",
-          disable_web_page_preview: true
-        })
-      });
-      const forwardPayload = await forwardRes.json();
-
-      if (!forwardRes.ok || !forwardPayload.ok) {
-        console.error("mark-reply-forward-failed", {
-          clientChatId: matchedTicket.client_chat_id,
-          error: forwardPayload.description
-        });
-        return NextResponse.json({ ok: false, error: "Forward to client failed" }, { status: 500 });
+      const forwardedTo: string[] = [];
+      for (const clientChatId of clientsToForward) {
+        try {
+          const res = await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              chat_id: clientChatId,
+              text: employeeText,
+              parse_mode: "HTML",
+              disable_web_page_preview: true
+            })
+          });
+          const payload = await res.json();
+          if (res.ok && payload.ok) {
+            forwardedTo.push(clientChatId);
+            console.log("mark-reply-forwarded", { clientChatId, forwardedMsgId: payload.result?.message_id });
+          } else {
+            console.error("mark-reply-forward-failed", { clientChatId, error: payload.description });
+          }
+        } catch (fwdErr) {
+          console.error("mark-reply-forward-error", { clientChatId, error: fwdErr instanceof Error ? fwdErr.message : "unknown" });
+        }
       }
 
-      console.log("mark-reply-forwarded", {
-        ticketId: matchedTicket.id,
-        clientChatId: matchedTicket.client_chat_id,
-        intent: matchedTicket.intent,
-        forwardedMsgId: forwardPayload.result?.message_id
-      });
-      return NextResponse.json({ ok: true, forwarded: true, ticketId: matchedTicket.id });
+      return NextResponse.json({ ok: true, forwarded: forwardedTo.length, clients: forwardedTo });
     }
 
     console.log("incoming-message-received", { chatId, messageId: message.message_id });

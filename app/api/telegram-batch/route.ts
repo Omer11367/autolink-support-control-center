@@ -1050,44 +1050,23 @@ async function handleBatch(request: Request) {
 
   console.log("mark-batch-ready", { count: tickets.length });
 
-  // Send one Telegram message per ticket to Mark's group.
-  // This replaces the single combined summary so that employees can REPLY to a specific
-  // ticket message and the bot can route their answer back to the right client group.
-  // Each ticket's internal_message_id is stored as its OWN Telegram message_id so the
-  // webhook can look it up when an employee replies.
-  const CATEGORY_HEADING: Record<typeof CATEGORY_ORDER[number], string> = {
-    Share: "SHARE REQUEST",
-    Unshare: "UNSHARE REQUEST",
-    Deposits: "DEPOSIT",
-    "Payment Issues": "PAYMENT ISSUE",
-    Verification: "VERIFICATION",
-    "Account Issues": "ACCOUNT ISSUE",
-    General: "GENERAL QUESTION"
-  };
-
-  const ticketMarkMsgIds = new Map<string, number>(); // ticketId → Telegram message_id
-
-  for (const ticket of tickets) {
-    try {
-      const category = mapIntentToCategory(ticket.intent);
-      const heading = CATEGORY_HEADING[category] ?? "REQUEST";
-      const chatTitle = extractedText(ticket.extracted_data, "chatTitle") ?? "Client group";
-      const taskText = cleanTaskText(ticket);
-      const ticketMsgText = `📝 ${heading} — ${escapeTelegramHtml(chatTitle)}\n\n* ${escapeTelegramHtml(taskText)}`;
-      const ticketSendResult = await maybeSendTelegramMessage({ chatId: markGroupChatId, text: ticketMsgText, source: "telegram_batch" });
-      if (ticketSendResult.telegramMessageId) {
-        ticketMarkMsgIds.set(ticket.id, ticketSendResult.telegramMessageId);
-      }
-      console.log("mark-ticket-sent", { ticketId: ticket.id, category, telegramMessageId: ticketSendResult.telegramMessageId });
-    } catch (err) {
-      console.error("mark-ticket-send-failed", { ticketId: ticket.id, error: err instanceof Error ? err.message : "unknown" });
-    }
+  // Send the combined batch summary to Mark's group (one message with all requests grouped
+  // by category — exactly as before). The Telegram message_id is stored as internal_message_id
+  // on every ticket in this batch so the webhook can look them all up when an employee replies.
+  const markSummary = buildMarkSummary(tickets);
+  const markSendResult = await maybeSendTelegramMessage({ chatId: markGroupChatId, text: markSummary, source: "telegram_batch" });
+  if (!markSendResult.sent || !markSendResult.telegramMessageId) {
+    throw new Error(markSendResult.reason ?? "Mark batch summary was not sent.");
   }
+  console.log("mark-batch-sent", { count: tickets.length, telegramMessageId: markSendResult.telegramMessageId });
 
-  if (ticketMarkMsgIds.size === 0) {
-    throw new Error("No ticket messages could be sent to Mark's group.");
-  }
-  console.log("mark-batch-sent", { count: tickets.length, sentCount: ticketMarkMsgIds.size });
+  await supabase.from("bot_responses").insert({
+    ticket_id: tickets[0]?.id ?? null,
+    telegram_chat_id: markGroupChatId,
+    telegram_message_id: markSendResult.telegramMessageId,
+    response_type: "batch_mark_summary",
+    response_text: markSummary
+  });
 
   // Forward deposit evidence photos to Mark as follow-up messages after the text summary.
   // Only deposit-related photos are forwarded (non-deposit screenshots are never sent).
@@ -1142,18 +1121,12 @@ async function handleBatch(request: Request) {
     }
   }
 
-  // Stamp each ticket with its OWN Telegram message_id (the per-ticket Mark message).
-  // The webhook uses this to match an employee reply_to_message.message_id back to the ticket
-  // and therefore to the correct client_chat_id to forward the answer to.
+  // Stamp every ticket in this batch with the combined summary's Telegram message_id.
+  // The webhook uses this shared ID to find all tickets when an employee replies to the summary.
   for (const ticket of tickets) {
-    const msgId = ticketMarkMsgIds.get(ticket.id);
-    if (!msgId) {
-      console.log("mark-ticket-msg-id-missing", { ticketId: ticket.id });
-      continue;
-    }
     const { data: processedTicket, error: updateError } = await supabase
       .from("tickets")
-      .update({ internal_message_id: msgId, updated_at: new Date().toISOString() })
+      .update({ internal_message_id: markSendResult.telegramMessageId, updated_at: new Date().toISOString() })
       .eq("id", ticket.id)
       .is("internal_message_id", null)
       .select("id");
@@ -1165,7 +1138,7 @@ async function handleBatch(request: Request) {
       console.log("duplicate-batch-prevented", { ticketId: ticket.id });
       continue;
     }
-    console.log("mark-batch-request-marked-sent", { ticketId: ticket.id, markMsgId: msgId });
+    console.log("mark-batch-request-marked-sent", { ticketId: ticket.id });
   }
 
   return NextResponse.json({
