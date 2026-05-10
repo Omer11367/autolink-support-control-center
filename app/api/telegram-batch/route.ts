@@ -680,29 +680,40 @@ async function createTicketsFromQueuedMessages(
       sortedUnprocessed.map((m) => (m.telegram_message_id != null ? String(m.telegram_message_id) : "")).filter(Boolean)
     );
 
-    const cleanMessages = sortedUnprocessed
-      .map((message) => {
-        const rawText = preserveBatchText(message.message_text ?? "");
-        // Detect cross-batch replies: client replied to a message from a previous batch.
-        // If the replied-to message IS in this batch window, its text is already visible in groupedText.
-        const replyTo = getReplyToMessage(message);
-        const replyText = getReplyText(replyTo);
-        const replyTargetId = replyTo?.message_id != null ? String(replyTo.message_id) : null;
-        const isCrossBatchReply = Boolean(replyText && replyTargetId && !batchTelegramMsgIds.has(replyTargetId));
-        if (isCrossBatchReply && rawText) {
-          // Show the quoted original message above the client's reply so Mark sees full context.
-          return `Re: "${replyText}"\n${rawText}`;
-        }
-        return rawText;
-      })
-      .filter((text) => text && !isPureNonSupportChatter(text));
-    const groupedText = preserveBatchText(cleanMessages.join("\n"));
+    // ── Step 1: classify each message individually and apply reply context ──────────────────────
+    // Each message gets its own intent so that a batch containing BOTH "do you have GH accounts?"
+    // (General) AND "please share 123 to BM 456" (Share) produces two separate tickets and two
+    // separate sections in Mark's summary, rather than one ticket that picks only the dominant intent.
+    type PerMessageItem = {
+      message: QueuedMessage;
+      text: string;
+      category: typeof CATEGORY_ORDER[number];
+      intent: string;
+    };
 
-    if (!groupedText) {
+    const perMessageItems: PerMessageItem[] = [];
+    for (const message of sortedUnprocessed) {
+      const rawText = preserveBatchText(message.message_text ?? "");
+      // Detect cross-batch replies: client replied to a message from a previous batch window.
+      const replyTo = getReplyToMessage(message);
+      const replyText = getReplyText(replyTo);
+      const replyTargetId = replyTo?.message_id != null ? String(replyTo.message_id) : null;
+      const isCrossBatchReply = Boolean(replyText && replyTargetId && !batchTelegramMsgIds.has(replyTargetId));
+      const text = isCrossBatchReply && rawText ? `Re: "${replyText}"\n${rawText}` : rawText;
+
+      if (!text || isPureNonSupportChatter(text)) continue;
+
+      const singleClassification = classifyIntent(text);
+      const category = mapIntentToCategory(singleClassification.intent);
+      perMessageItems.push({ message, text, category, intent: singleClassification.intent });
+    }
+
+    // ── Step 2: handle all-chatter case (greetings, non-support) ───────────────────────────────
+    if (perMessageItems.length === 0) {
       console.log("non-request-message-skipped", { chatId, messageCount: unprocessedMessages.length });
-      const messageTexts = unprocessedMessages.map((message) => compactText(message.message_text ?? "")).filter(Boolean);
+      const messageTexts = unprocessedMessages.map((m) => compactText(m.message_text ?? "")).filter(Boolean);
       if (messageTexts.some(isGreetingText)) {
-        const reply = chooseGreetingReply(unprocessedMessages);
+        const reply = chooseGreetingReply(sortedUnprocessed);
         const greetingResult = await maybeSendTelegramMessage({ chatId, text: reply, source: "telegram_batch" });
         await markChatBatchProcessed(supabase, chatId, "batch_client_greeting", reply, greetingResult.telegramMessageId, lastMessageMs);
         console.log("client-greeting-sent", { chatId, messageCount: unprocessedMessages.length });
@@ -712,119 +723,148 @@ async function createTicketsFromQueuedMessages(
       continue;
     }
 
-    if (!hasRequestSignal(groupedText)) {
-      console.log("unclear-batch-forwarded-as-general", { chatId, messageCount: unprocessedMessages.length });
+    // ── Step 3: group consecutive messages that share the same category ─────────────────────────
+    // Consecutive messages belonging to the same category are merged (e.g. two lines of a share
+    // request). A category switch starts a new group (e.g. General → Share → General).
+    type MessageGroup = { texts: string[]; messages: QueuedMessage[]; category: typeof CATEGORY_ORDER[number] };
+    const messageGroups: MessageGroup[] = [];
+    for (const item of perMessageItems) {
+      const lastGroup = messageGroups[messageGroups.length - 1];
+      if (lastGroup && lastGroup.category === item.category) {
+        lastGroup.texts.push(item.text);
+        lastGroup.messages.push(item.message);
+      } else {
+        messageGroups.push({ texts: [item.text], messages: [item.message], category: item.category });
+      }
     }
 
-    if (isIncompleteRequestFragment(groupedText)) {
-      console.log("support-fragment-held-for-next-batch", { chatId, groupedText });
-      continue;
-    }
-
-    console.log("grouped-message-created", { chatId, messageCount: unprocessedMessages.length });
-    const linkedContext = await findFollowUpContext(supabase, chatId, unprocessedMessages, groupedText);
-    const isLinkedFollowUp = Boolean(linkedContext && isFollowUpText(groupedText));
-    const baseClassification = classifyIntent(groupedText, linkedContext && !isLinkedFollowUp ? linkedContext.originalMessage : "");
-    const classification = linkedContext
-      ? isLinkedFollowUp
-        ? withFollowUpContext(baseClassification, groupedText, linkedContext)
-        : {
-            ...baseClassification,
-            extractedData: {
-              ...extractedObject(baseClassification.extractedData),
-              linkedOriginalSummary: linkedContext.originalSummary,
-              linkedOriginalMessage: linkedContext.originalMessage,
-              linkedTicketId: linkedContext.linkedTicketId,
-              linkedClientMessageId: linkedContext.linkedClientMessageId,
-              replyToTelegramMessageId: linkedContext.replyToTelegramMessageId,
-              replyToMessageText: linkedContext.replyToMessageText
-            },
-            internalSummary: `${baseClassification.internalSummary} Linked context: ${linkedContext.originalSummary}.`
-          }
-      : baseClassification;
-    const storedClientMessage = linkedContext ? buildFollowUpTicketMessage(groupedText, linkedContext) : groupedText;
-    if (!classification.requiresMark || classification.intent === "no_action") {
-      console.log("non-request-message-skipped", { chatId, intent: classification.intent });
-      await markChatBatchProcessed(supabase, chatId, "batch_non_request_skipped", "no-action batch skipped", null, lastMessageMs);
-      continue;
-    }
-
+    // ── Step 4: create one ticket per category group ────────────────────────────────────────────
     const duplicateStartIso = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
-    const { data: duplicateTicketData, error: duplicateError } = await supabase
-      .from("tickets")
-      .select("id")
-      .eq("client_chat_id", chatId)
-      .eq("client_original_message", storedClientMessage)
-      .gte("created_at", duplicateStartIso)
-      .limit(1)
-      .maybeSingle();
-    if (duplicateError) throw new Error(`Supabase duplicate ticket query failed: ${duplicateError.message}`);
-    const duplicateTicket = duplicateTicketData as { id: string } | null;
-    if (duplicateTicket?.id) {
-      console.log("duplicate-batch-prevented", { chatId, ticketId: duplicateTicket.id });
-      await markChatBatchProcessed(supabase, chatId, "batch_duplicate_skipped", `duplicate ticket skipped: ${duplicateTicket.id}`, null, lastMessageMs);
-      continue;
-    }
+    let ticketsCreatedForChat = 0;
 
-    const latestMessage = unprocessedMessages[unprocessedMessages.length - 1];
-    if (!latestMessage) continue;
-    const messageTime = getTelegramMessageDate(latestMessage);
-    const { data: createdTicketData, error: createTicketError } = await supabase
-      .from("tickets")
-      .insert({
-        ticket_code: createTicketCode(),
-        client_chat_id: chatId,
-        client_message_id: latestMessage?.id ?? null,
-        client_user_id: null,
-        client_username: getUsername(latestMessage),
-        intent: classification.intent,
-        status: "waiting_mark",
-        priority: ["deposit_funds", "refund_request", "payment_issue", "check_policy"].includes(classification.intent) ? "high" : "normal",
-        needs_mark: true,
-        client_original_message: storedClientMessage,
-        extracted_data: classification.extractedData,
-        internal_summary: classification.internalSummary,
-        holding_message_id: null,
-        internal_message_id: null,
-        created_at: messageTime.toISOString(),
-        updated_at: messageTime.toISOString()
-      })
-      .select("id, intent, client_chat_id, client_message_id, client_original_message, extracted_data, internal_summary, created_at")
-      .single();
-    const createdTicket = createdTicketData as BatchTicket | null;
-    if (createTicketError || !createdTicket?.id) {
-      throw new Error(`Supabase tickets insert failed: ${createTicketError?.message ?? "Unknown error"}`);
-    }
+    for (const group of messageGroups) {
+      const groupedText = preserveBatchText(group.texts.join("\n"));
+      if (!groupedText) continue;
 
-    try {
-      const sheetActions = getActions(classification.extractedData);
-      const sheetRows = sheetActions.length > 0 ? sheetActions : [null];
+      if (!hasRequestSignal(groupedText)) {
+        console.log("unclear-batch-forwarded-as-general", { chatId, category: group.category });
+      }
 
-      for (const action of sheetRows) {
-        const extractedData = action ? { ...classification.extractedData, actions: [action] } : classification.extractedData;
-        await writeClientRequestRowToGoogleSheet({
-          telegramGroup: getChatTitle(latestMessage),
-          username: getUsername(latestMessage),
-          originalMessage: storedClientMessage,
-          parsedMessage: action ? cleanActionTaskText(createdTicket, action) : classification.internalSummary || groupedText,
-          intent: action ? actionTypeToIntent(action) : classification.intent,
-          status: "Pending",
-          extractedData,
-          now: messageTime
+      if (isIncompleteRequestFragment(groupedText)) {
+        console.log("support-fragment-held-for-next-batch", { chatId, groupedText });
+        continue;
+      }
+
+      console.log("grouped-message-created", { chatId, category: group.category, messageCount: group.messages.length });
+      const linkedContext = await findFollowUpContext(supabase, chatId, group.messages, groupedText);
+      const isLinkedFollowUp = Boolean(linkedContext && isFollowUpText(groupedText));
+      const baseClassification = classifyIntent(groupedText, linkedContext && !isLinkedFollowUp ? linkedContext.originalMessage : "");
+      const classification = linkedContext
+        ? isLinkedFollowUp
+          ? withFollowUpContext(baseClassification, groupedText, linkedContext)
+          : {
+              ...baseClassification,
+              extractedData: {
+                ...extractedObject(baseClassification.extractedData),
+                linkedOriginalSummary: linkedContext.originalSummary,
+                linkedOriginalMessage: linkedContext.originalMessage,
+                linkedTicketId: linkedContext.linkedTicketId,
+                linkedClientMessageId: linkedContext.linkedClientMessageId,
+                replyToTelegramMessageId: linkedContext.replyToTelegramMessageId,
+                replyToMessageText: linkedContext.replyToMessageText
+              },
+              internalSummary: `${baseClassification.internalSummary} Linked context: ${linkedContext.originalSummary}.`
+            }
+        : baseClassification;
+
+      const storedClientMessage = linkedContext ? buildFollowUpTicketMessage(groupedText, linkedContext) : groupedText;
+
+      if (!classification.requiresMark || classification.intent === "no_action") {
+        console.log("non-request-group-skipped", { chatId, category: group.category, intent: classification.intent });
+        continue;
+      }
+
+      const { data: duplicateTicketData, error: duplicateError } = await supabase
+        .from("tickets")
+        .select("id")
+        .eq("client_chat_id", chatId)
+        .eq("client_original_message", storedClientMessage)
+        .gte("created_at", duplicateStartIso)
+        .limit(1)
+        .maybeSingle();
+      if (duplicateError) throw new Error(`Supabase duplicate ticket query failed: ${duplicateError.message}`);
+      const duplicateTicket = duplicateTicketData as { id: string } | null;
+      if (duplicateTicket?.id) {
+        console.log("duplicate-batch-prevented", { chatId, ticketId: duplicateTicket.id });
+        ticketsCreatedForChat++; // count as handled so we don't add a spurious skip marker
+        continue;
+      }
+
+      const latestGroupMessage = group.messages[group.messages.length - 1];
+      if (!latestGroupMessage) continue;
+      const messageTime = getTelegramMessageDate(latestGroupMessage);
+
+      const { data: createdTicketData, error: createTicketError } = await supabase
+        .from("tickets")
+        .insert({
+          ticket_code: createTicketCode(),
+          client_chat_id: chatId,
+          client_message_id: latestGroupMessage.id ?? null,
+          client_user_id: null,
+          client_username: getUsername(latestGroupMessage),
+          intent: classification.intent,
+          status: "waiting_mark",
+          priority: ["deposit_funds", "refund_request", "payment_issue", "check_policy"].includes(classification.intent) ? "high" : "normal",
+          needs_mark: true,
+          client_original_message: storedClientMessage,
+          extracted_data: classification.extractedData,
+          internal_summary: classification.internalSummary,
+          holding_message_id: null,
+          internal_message_id: null,
+          created_at: messageTime.toISOString(),
+          updated_at: messageTime.toISOString()
+        })
+        .select("id, intent, client_chat_id, client_message_id, client_original_message, extracted_data, internal_summary, created_at")
+        .single();
+      const createdTicket = createdTicketData as BatchTicket | null;
+      if (createTicketError || !createdTicket?.id) {
+        throw new Error(`Supabase tickets insert failed: ${createTicketError?.message ?? "Unknown error"}`);
+      }
+
+      try {
+        const sheetActions = getActions(classification.extractedData);
+        const sheetRows = sheetActions.length > 0 ? sheetActions : [null];
+        for (const action of sheetRows) {
+          const extractedData = action ? { ...classification.extractedData, actions: [action] } : classification.extractedData;
+          await writeClientRequestRowToGoogleSheet({
+            telegramGroup: getChatTitle(latestGroupMessage),
+            username: getUsername(latestGroupMessage),
+            originalMessage: storedClientMessage,
+            parsedMessage: action ? cleanActionTaskText(createdTicket, action) : classification.internalSummary || groupedText,
+            intent: action ? actionTypeToIntent(action) : classification.intent,
+            status: "Pending",
+            extractedData,
+            now: messageTime
+          });
+        }
+        console.log("google-sheets-row-write-success", { chatId, ticketId: createdTicket.id });
+      } catch (error) {
+        console.log("google-sheets-write-failed", {
+          chatId,
+          ticketId: createdTicket.id,
+          error: error instanceof Error ? error.message : "Google Sheets write failed."
         });
       }
-      console.log("google-sheets-row-write-success", { chatId, ticketId: createdTicket.id });
-    } catch (error) {
-      console.log("google-sheets-write-failed", {
-        chatId,
-        ticketId: createdTicket.id,
-        error: error instanceof Error ? error.message : "Google Sheets write failed."
-      });
+
+      console.log("request-added-to-mark-batch", { chatId, ticketId: createdTicket.id, intent: classification.intent });
+      createdTickets.push(createdTicket as BatchTicket);
+      ticketsCreatedForChat++;
     }
 
-    console.log("request-added-to-mark-batch", { chatId, ticketId: createdTicket.id, intent: classification.intent });
-    console.log("client-ack-scheduled", { chatId, ticketId: createdTicket.id });
-    createdTickets.push(createdTicket as BatchTicket);
+    // If all groups were no-action / fragments, mark the chat so processedThroughMs advances.
+    if (ticketsCreatedForChat === 0) {
+      await markChatBatchProcessed(supabase, chatId, "batch_non_request_skipped", "no-action batch skipped", null, lastMessageMs);
+    }
     } catch (chatError) {
       // Per-chat isolation: one failing chat must not block other chats from being processed.
       // Without this, a single bad query (e.g. a duplicate ticket race, a sheets API hiccup)
