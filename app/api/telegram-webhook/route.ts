@@ -69,6 +69,24 @@ function isImageDocument(document?: TelegramMessage["document"]): boolean {
   return Boolean(document?.file_id && document.mime_type?.toLowerCase().startsWith("image/"));
 }
 
+// Returns true when an employee reply from Mark's group is just a holding acknowledgment
+// ("got it", "on it", "we'll check", etc.) that the client already received from the bot.
+// These should NOT be forwarded — only real answers (resolutions, updates, results) go to clients.
+function isEmployeeHoldingAck(text: string): boolean {
+  const t = text.trim().toLowerCase().replace(/[!?.，。]+$/, "");
+  // Exact short acks
+  if (/^(ok|okay|got it|on it|noted|sure|copy|received|understood|will do|checking|check|yep|yup)$/.test(t)) return true;
+  // "We'll / I'll / Let me check/look/handle"
+  if (/\b(we'?ll|i'?ll|let me|will)\s+(check|look into|handle|take care of|get back)/.test(t)) return true;
+  // "Looking / checking / working on it/this"
+  if (/\b(looking|checking|working)\s+(into|on|at)\s+(it|this)/.test(t)) return true;
+  // "On it / handling this"
+  if (/^(on|handling)\s+(it|this)$/.test(t)) return true;
+  // "We're on it / we got this"
+  if (/^(we'?re on it|we got (it|this)|got this)$/.test(t)) return true;
+  return false;
+}
+
 export async function GET() {
   return NextResponse.json({
     ok: true,
@@ -103,9 +121,78 @@ export async function POST(request: Request) {
 
     const chatId = message.chat.id;
 
+    // ── Employee reply from Mark's internal group ────────────────────────────────────────────────
+    // When an employee in Mark's group REPLIES to a per-ticket bot message, check if it's a
+    // real answer (e.g. "funds added", "account shared") and forward it to the right client.
+    // Holding acks ("got it", "on it", "we'll check") are silently ignored — the client already
+    // received the bot's auto-acknowledgment when the ticket was created.
     if (String(chatId) === String(markGroupChatId)) {
-      console.log("mark-internal-group-skipped", { chatId, messageId: message.message_id });
-      return NextResponse.json({ ok: true, ignored: "mark_internal_group" });
+      const replyToMsgId = message.reply_to_message?.message_id;
+
+      // Only act on replies — standalone messages in Mark's group are ignored.
+      if (!replyToMsgId) {
+        console.log("mark-group-non-reply-skipped", { chatId, messageId: message.message_id });
+        return NextResponse.json({ ok: true, ignored: "mark_group_non_reply" });
+      }
+
+      const employeeText = (message.text ?? message.caption ?? "").trim();
+
+      // Empty or holding-ack replies are ignored.
+      if (!employeeText || isEmployeeHoldingAck(employeeText)) {
+        console.log("mark-employee-reply-ignored", {
+          messageId: message.message_id,
+          reason: !employeeText ? "empty" : "holding_ack"
+        });
+        return NextResponse.json({ ok: true, ignored: "holding_ack_or_empty" });
+      }
+
+      // Find the ticket whose per-ticket Mark message this is a reply to.
+      const { data: matchedTicket, error: ticketError } = await supabase
+        .from("tickets")
+        .select("id, client_chat_id, intent")
+        .eq("internal_message_id", replyToMsgId)
+        .limit(1)
+        .maybeSingle();
+
+      if (ticketError || !matchedTicket?.client_chat_id) {
+        console.log("mark-reply-no-ticket", { replyToMsgId, error: ticketError?.message ?? "no match" });
+        return NextResponse.json({ ok: true, ignored: "no_matching_ticket" });
+      }
+
+      // Forward the employee's real answer to the correct client group.
+      const token = process.env.TELEGRAM_BOT_TOKEN?.trim();
+      if (!token) {
+        console.error("mark-reply-forward-no-token");
+        return NextResponse.json({ ok: false, error: "Missing bot token" }, { status: 500 });
+      }
+
+      const forwardRes = await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          chat_id: matchedTicket.client_chat_id,
+          text: employeeText,
+          parse_mode: "HTML",
+          disable_web_page_preview: true
+        })
+      });
+      const forwardPayload = await forwardRes.json();
+
+      if (!forwardRes.ok || !forwardPayload.ok) {
+        console.error("mark-reply-forward-failed", {
+          clientChatId: matchedTicket.client_chat_id,
+          error: forwardPayload.description
+        });
+        return NextResponse.json({ ok: false, error: "Forward to client failed" }, { status: 500 });
+      }
+
+      console.log("mark-reply-forwarded", {
+        ticketId: matchedTicket.id,
+        clientChatId: matchedTicket.client_chat_id,
+        intent: matchedTicket.intent,
+        forwardedMsgId: forwardPayload.result?.message_id
+      });
+      return NextResponse.json({ ok: true, forwarded: true, ticketId: matchedTicket.id });
     }
 
     console.log("incoming-message-received", { chatId, messageId: message.message_id });
