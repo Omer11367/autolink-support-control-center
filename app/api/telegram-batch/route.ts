@@ -564,14 +564,20 @@ async function findFollowUpContext(
 async function getLastBatchMarkerMs(supabase: SupabaseAdminClient, chatId: string): Promise<number> {
   const { data, error } = await supabase
     .from("bot_responses")
-    .select("created_at")
+    .select("created_at, response_text")
     .eq("telegram_chat_id", chatId)
     .in("response_type", BATCH_MARKER_TYPES)
     .order("created_at", { ascending: false })
     .limit(1)
     .maybeSingle();
   if (error) throw new Error(`Supabase batch marker query failed: ${error.message}`);
-  return data?.created_at ? new Date(data.created_at).getTime() : 0;
+  if (!data?.created_at) return 0;
+  // Use the stored last-message timestamp rather than the row insertion time.
+  // The insertion time can be minutes ahead of the actual messages, causing those
+  // messages to be permanently excluded from future batches.
+  const msgMsMatch = (data.response_text ?? "").match(/\|lastMsgMs:(\d+)/);
+  if (msgMsMatch?.[1]) return parseInt(msgMsMatch[1], 10);
+  return new Date(data.created_at).getTime();
 }
 
 async function markChatBatchProcessed(
@@ -579,14 +585,16 @@ async function markChatBatchProcessed(
   chatId: string,
   responseType: BatchMarkerType,
   responseText: string,
-  telegramMessageId: number | null = null
+  telegramMessageId: number | null = null,
+  lastMessageMs: number = 0
 ) {
+  const storedText = lastMessageMs > 0 ? `${responseText}|lastMsgMs:${lastMessageMs}` : responseText;
   await supabase.from("bot_responses").insert({
     ticket_id: null,
     telegram_chat_id: chatId,
     telegram_message_id: telegramMessageId,
     response_type: responseType,
-    response_text: responseText
+    response_text: storedText
   });
 }
 
@@ -633,8 +641,16 @@ async function createTicketsFromQueuedMessages(
     });
     if (unprocessedMessages.length === 0) continue;
 
-    const cleanMessages = unprocessedMessages
-      .sort((a, b) => new Date(a.created_at ?? 0).getTime() - new Date(b.created_at ?? 0).getTime())
+    const sortedUnprocessed = unprocessedMessages.sort(
+      (a, b) => new Date(a.created_at ?? 0).getTime() - new Date(b.created_at ?? 0).getTime()
+    );
+    // Track the latest message timestamp so batch markers store message time,
+    // not insertion time — prevents future messages from being permanently excluded.
+    const lastMessageMs = Math.max(
+      ...sortedUnprocessed.map((m) => (m.created_at ? new Date(m.created_at).getTime() : 0))
+    );
+
+    const cleanMessages = sortedUnprocessed
       .map((message) => preserveBatchText(message.message_text ?? ""))
       .filter((text) => text && !isPureNonSupportChatter(text));
     const groupedText = preserveBatchText(cleanMessages.join("\n"));
@@ -645,10 +661,10 @@ async function createTicketsFromQueuedMessages(
       if (messageTexts.some(isGreetingText)) {
         const reply = chooseGreetingReply(unprocessedMessages);
         const greetingResult = await maybeSendTelegramMessage({ chatId, text: reply, source: "telegram_batch" });
-        await markChatBatchProcessed(supabase, chatId, "batch_client_greeting", reply, greetingResult.telegramMessageId);
+        await markChatBatchProcessed(supabase, chatId, "batch_client_greeting", reply, greetingResult.telegramMessageId, lastMessageMs);
         console.log("client-greeting-sent", { chatId, messageCount: unprocessedMessages.length });
       } else {
-        await markChatBatchProcessed(supabase, chatId, "batch_non_request_skipped", "non-support chatter skipped");
+        await markChatBatchProcessed(supabase, chatId, "batch_non_request_skipped", "non-support chatter skipped", null, lastMessageMs);
       }
       continue;
     }
@@ -686,7 +702,7 @@ async function createTicketsFromQueuedMessages(
     const storedClientMessage = linkedContext ? buildFollowUpTicketMessage(groupedText, linkedContext) : groupedText;
     if (!classification.requiresMark || classification.intent === "no_action") {
       console.log("non-request-message-skipped", { chatId, intent: classification.intent });
-      await markChatBatchProcessed(supabase, chatId, "batch_non_request_skipped", "no-action batch skipped");
+      await markChatBatchProcessed(supabase, chatId, "batch_non_request_skipped", "no-action batch skipped", null, lastMessageMs);
       continue;
     }
 
@@ -703,7 +719,7 @@ async function createTicketsFromQueuedMessages(
     const duplicateTicket = duplicateTicketData as { id: string } | null;
     if (duplicateTicket?.id) {
       console.log("duplicate-batch-prevented", { chatId, ticketId: duplicateTicket.id });
-      await markChatBatchProcessed(supabase, chatId, "batch_duplicate_skipped", `duplicate ticket skipped: ${duplicateTicket.id}`);
+      await markChatBatchProcessed(supabase, chatId, "batch_duplicate_skipped", `duplicate ticket skipped: ${duplicateTicket.id}`, null, lastMessageMs);
       continue;
     }
 
