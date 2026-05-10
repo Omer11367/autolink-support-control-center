@@ -338,7 +338,15 @@ function cleanTaskText(ticket: BatchTicket): string {
   // Return the full original message (line-breaks preserved) so multi-question groups
   // (e.g. "monthly reports?" + "accounts in stock?") and reply-context blocks
   // (e.g. "Re: "Did you share?"\nDid you share those?") display correctly in Mark's summary.
-  return preservedOriginal || "General support request";
+  // Deduplicate consecutive identical lines: if the same message was picked up twice because
+  // a previous batch failed without advancing processedThroughMs, the grouped text contains
+  // the same line twice (e.g. "do you have accounts?\ndo you have accounts?"). Remove the dupe.
+  if (preservedOriginal) {
+    const lines = preservedOriginal.split("\n");
+    const deduped = lines.filter((line, i) => i === 0 || line.trim() !== lines[i - 1]?.trim());
+    return deduped.join("\n");
+  }
+  return "General support request";
 }
 
 function cleanActionTaskText(ticket: BatchTicket, action: SheetAction): string {
@@ -359,7 +367,9 @@ function cleanActionTaskText(ticket: BatchTicket, action: SheetAction): string {
     else if (accounts) baseText = `unshare accounts ${accounts}`;
     else baseText = linkedOriginalSummary || original || "unshare account request";
   } else if (action.type === "payment_check") {
+    const depositUrl = extractFirstUrl(original);
     baseText = action.amount ? `sent ${action.amount}, please check` : linkedOriginalSummary || "deposit sent, please check";
+    if (depositUrl) baseText += `\n${depositUrl}`;
   } else if (action.type === "verify_account") {
     baseText = accounts ? `verify account ${accounts}` : linkedOriginalSummary || "verification request";
   } else if (action.type === "account_status_check") {
@@ -1067,8 +1077,12 @@ async function handleBatch(request: Request) {
     }
   }
 
+  // Client replies are driven ONLY by tickets created in THIS batch run.
+  // Old pending tickets (internal_message_id still null from a previous failed batch) were
+  // already replied to in their own batch — including them here would send a second reply
+  // hours later, and worse, a stuck deposit ticket could override a fresh site-issue reply.
   const ticketsByClient = new Map<string, BatchTicket[]>();
-  for (const ticket of tickets) {
+  for (const ticket of createdTickets) {
     if (!ticket.client_chat_id || ticket.holding_message_id) continue;
     const key = String(ticket.client_chat_id);
     ticketsByClient.set(key, [...(ticketsByClient.get(key) ?? []), ticket]);
