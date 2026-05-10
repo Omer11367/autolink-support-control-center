@@ -674,10 +674,12 @@ async function markChatBatchProcessed(
   });
 }
 
+type ChatError = { chatId: string; error: string };
+
 async function createTicketsFromQueuedMessages(
   supabase: SupabaseAdminClient,
   messages: QueuedMessage[]
-): Promise<{ tickets: BatchTicket[]; photoForwards: PhotoForward[] }> {
+): Promise<{ tickets: BatchTicket[]; photoForwards: PhotoForward[]; chatErrors: ChatError[] }> {
   const messagesByChat = new Map<string, QueuedMessage[]>();
   for (const message of messages) {
     if (!message.telegram_chat_id) continue;
@@ -687,6 +689,7 @@ async function createTicketsFromQueuedMessages(
 
   const createdTickets: BatchTicket[] = [];
   const allPhotoForwards: PhotoForward[] = [];
+  const chatErrors: ChatError[] = [];
   for (const [chatId, chatMessages] of messagesByChat.entries()) {
     try {
     const { data: latestTicketData, error: latestTicketError } = await supabase
@@ -838,7 +841,13 @@ async function createTicketsFromQueuedMessages(
       console.log("grouped-message-created", { chatId, category: group.category, messageCount: group.messages.length });
       const linkedContext = await findFollowUpContext(supabase, chatId, group.messages, groupedText);
       const isLinkedFollowUp = Boolean(linkedContext && isFollowUpText(groupedText));
-      const baseClassification = classifyIntent(groupedText, linkedContext && !isLinkedFollowUp ? linkedContext.originalMessage : "");
+      // Never pass previousContext to the base classification.
+      // If we did (e.g. linkedContext.originalMessage = "sent 50K" from a previous deposit),
+      // classifyIntent would combine that old deposit text with the current message, causing
+      // hasDepositPriority() to fire and override the real intent — e.g. a site-down question
+      // would be misclassified as deposit_funds. The linkedContext is used AFTER classification
+      // to enrich the ticket's metadata, not to influence what the message is about.
+      const baseClassification = classifyIntent(groupedText);
       const classification = linkedContext
         ? isLinkedFollowUp
           ? withFollowUpContext(baseClassification, groupedText, linkedContext)
@@ -956,15 +965,17 @@ async function createTicketsFromQueuedMessages(
       // Without this, a single bad query (e.g. a duplicate ticket race, a sheets API hiccup)
       // would silently kill the rest of the batch — symptoms exactly like BluePeak / NovaAds
       // never getting a reply while Client Test Group did.
+      const errorMessage = chatError instanceof Error ? chatError.message : "unknown error";
       console.error("chat-batch-failed", {
         chatId,
-        error: chatError instanceof Error ? chatError.message : "unknown error",
+        error: errorMessage,
         stack: chatError instanceof Error ? chatError.stack : undefined
       });
+      chatErrors.push({ chatId, error: errorMessage });
     }
   }
 
-  return { tickets: createdTickets, photoForwards: allPhotoForwards };
+  return { tickets: createdTickets, photoForwards: allPhotoForwards, chatErrors };
 }
 
 async function handleBatch(request: Request) {
@@ -999,7 +1010,10 @@ async function handleBatch(request: Request) {
     .limit(500);
   if (queuedMessagesError) throw new Error(`Supabase queued messages query failed: ${queuedMessagesError.message}`);
 
-  const { tickets: createdTickets, photoForwards } = await createTicketsFromQueuedMessages(supabase, (queuedMessagesData ?? []) as unknown as QueuedMessage[]);
+  const { tickets: createdTickets, photoForwards, chatErrors } = await createTicketsFromQueuedMessages(supabase, (queuedMessagesData ?? []) as unknown as QueuedMessage[]);
+  if (chatErrors.length > 0) {
+    console.error("batch-had-chat-errors", { count: chatErrors.length, errors: chatErrors });
+  }
 
   const { data, error } = await supabase
     .from("tickets")
@@ -1108,7 +1122,14 @@ async function handleBatch(request: Request) {
     console.log("mark-batch-request-marked-sent", { ticketId: ticket.id });
   }
 
-  return NextResponse.json({ ok: true, count: tickets.length, clientGroups: clientReplyCount });
+  return NextResponse.json({
+    ok: true,
+    count: tickets.length,
+    clientGroups: clientReplyCount,
+    // Expose per-chat errors so they're visible in the Vercel function response
+    // without needing to dig through server logs.
+    chatErrors: chatErrors.length > 0 ? chatErrors : undefined
+  });
 }
 
 export async function GET(request: Request) {
