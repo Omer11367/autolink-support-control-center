@@ -419,7 +419,16 @@ function buildMarkSummary(tickets: BatchTicket[]): string {
     .map((category) => {
       const items = grouped.get(category) ?? [];
       if (items.length === 0) return null;
-      return [headings[category], ...items.map((item) => `* ${escapeTelegramHtml(item)}`)].join("\n\n");
+      // Deduplicate: if two tickets in the same category produce identical display text
+      // (e.g. the same question picked up in two consecutive batches), show it only once.
+      const seen = new Set<string>();
+      const uniqueItems = items.filter((item) => {
+        const key = item.trim().toLowerCase();
+        if (seen.has(key)) return false;
+        seen.add(key);
+        return true;
+      });
+      return [headings[category], ...uniqueItems.map((item) => `* ${escapeTelegramHtml(item)}`)].join("\n\n");
     })
     .filter(Boolean);
 
@@ -439,7 +448,16 @@ function chooseClientReply(tickets: BatchTicket[]): string {
   if (categories.includes("Verification")) return "Got it, we'll check the verification and update you.";
   if (categories.includes("Account Issues")) return "Got it, we'll look into the account issue and update you.";
 
-  // General category — pick a reply based on the specific intent so clients get a useful response.
+  // General category — when there are multiple DIFFERENT intents the client asked about several
+  // separate topics in one batch. Picking one intent-specific reply silently ignores the rest.
+  // Use a neutral reply so every question is acknowledged without over-promising on any one.
+  const allGeneral = categories.every((c) => c === "General");
+  const uniqueGeneralIntents = intents.filter((_, i) => categories[i] === "General");
+  if (allGeneral && new Set(uniqueGeneralIntents).size > 1) {
+    return "Got it, let me check and I'll get back to you.";
+  }
+
+  // Single General intent — pick a reply tailored to what they actually asked.
   if (intents.some((i) => i === "site_issue")) {
     return "We're looking into the site issue and will update you shortly.";
   }
@@ -802,9 +820,14 @@ async function createTicketsFromQueuedMessages(
     // ── Step 3: group consecutive messages that share the same category ─────────────────────────
     // Consecutive messages belonging to the same category are merged (e.g. two lines of a share
     // request). A category switch starts a new group (e.g. General → Share → General).
-    // Special rule: a message that is ONLY a URL (e.g. an Etherscan link following "sent 30K")
-    // inherits the previous group's category so the link stays with the deposit, not General.
-    type MessageGroup = { texts: string[]; messages: QueuedMessage[]; category: typeof CATEGORY_ORDER[number] };
+    // Special rules:
+    // - A URL-only message (e.g. an Etherscan link following "sent 30K") inherits the previous
+    //   group's category so the link stays with the deposit, not General.
+    // - Within the General category, consecutive messages are only merged when they share the
+    //   same intent. A site-issue message followed by a monthly-report question are two separate
+    //   topics — grouping them into one ticket would cause chooseClientReply to pick only one
+    //   topic's reply and silently ignore the other.
+    type MessageGroup = { texts: string[]; messages: QueuedMessage[]; category: typeof CATEGORY_ORDER[number]; intent: string };
     const messageGroups: MessageGroup[] = [];
     const chatPhotoForwards: PhotoForward[] = [];
 
@@ -812,11 +835,15 @@ async function createTicketsFromQueuedMessages(
       const lastGroup = messageGroups[messageGroups.length - 1];
       // URL-only messages (Etherscan links etc.) belong to whatever came before them.
       const effectiveCategory = (lastGroup && isUrlOnlyText(item.text)) ? lastGroup.category : item.category;
-      if (lastGroup && lastGroup.category === effectiveCategory) {
+      const sameGroup = lastGroup && lastGroup.category === effectiveCategory
+        // For General, also require the same intent so different questions (site-down vs monthly
+        // report) get separate tickets — and therefore a proper combined neutral client reply.
+        && (effectiveCategory !== "General" || lastGroup.intent === item.intent);
+      if (sameGroup) {
         lastGroup.texts.push(item.text);
         lastGroup.messages.push(item.message);
       } else {
-        messageGroups.push({ texts: [item.text], messages: [item.message], category: effectiveCategory });
+        messageGroups.push({ texts: [item.text], messages: [item.message], category: effectiveCategory, intent: item.intent });
       }
     }
 
