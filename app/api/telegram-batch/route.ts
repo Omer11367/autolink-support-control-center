@@ -16,6 +16,7 @@ type QueuedMessage = {
   id: string;
   created_at: string | null;
   telegram_chat_id: string | number | null;
+  telegram_message_id: number | string | null;
   telegram_username: string | null;
   message_text: string | null;
   message_type: string | null;
@@ -244,7 +245,11 @@ function cleanTaskText(ticket: BatchTicket): string {
   if (followUpMessage && linkedOriginalSummary) return formatFollowUpTask(followUpMessage, linkedOriginalSummary);
 
   const category = mapIntentToCategory(ticket.intent);
+  // Compact version is used for entity extraction (regex matching).
+  // Preserved version is used as fallback display text so multi-line groups (e.g. reply context
+  // prepended as "Re: …\nclient reply") show as separate lines in Mark's summary.
   const original = compactText(ticket.client_original_message ?? "");
+  const preservedOriginal = preserveBatchText(ticket.client_original_message ?? "");
   const actions = getActions(ticket.extracted_data);
   const shareAction = actions.find((action) => action.type === "share_account");
   const unshareAction = actions.find((action) => action.type === "unshare_account");
@@ -257,7 +262,7 @@ function cleanTaskText(ticket: BatchTicket): string {
     const bm = formatBm(shareAction?.bm) ?? extractEntityAfter(original, ["bm", "business manager"]);
     if (account && bm) return `share account ${account} to BM ${bm}`;
     if (account) return `share account ${account}`;
-    return original || "share account request";
+    return preservedOriginal || "share account request";
   }
 
   if (category === "Unshare") {
@@ -266,7 +271,7 @@ function cleanTaskText(ticket: BatchTicket): string {
     const bm = formatBm(unshareAction?.bm) ?? extractEntityAfter(original, ["bm", "business manager"]);
     if (account && bm) return `unshare accounts ${account} from ${bm}`;
     if (account) return `unshare accounts ${account}`;
-    return original || "unshare account request";
+    return preservedOriginal || "unshare account request";
   }
 
   if (category === "Deposits") {
@@ -293,9 +298,10 @@ function cleanTaskText(ticket: BatchTicket): string {
     return account ? `account issue on account ${account}` : "account issue reported";
   }
 
-  // Return the full original message so multi-question groups (e.g. "monthly reports?" +
-  // "accounts in stock?") are never collapsed into a single-topic summary that loses questions.
-  return original || "General support request";
+  // Return the full original message (line-breaks preserved) so multi-question groups
+  // (e.g. "monthly reports?" + "accounts in stock?") and reply-context blocks
+  // (e.g. "Re: "Did you share?"\nDid you share those?") display correctly in Mark's summary.
+  return preservedOriginal || "General support request";
 }
 
 function cleanActionTaskText(ticket: BatchTicket, action: SheetAction): string {
@@ -653,8 +659,26 @@ async function createTicketsFromQueuedMessages(
       ...sortedUnprocessed.map((m) => (m.created_at ? new Date(m.created_at).getTime() : 0))
     );
 
+    // Build a set of telegram_message_ids present in this batch so we can detect cross-batch replies.
+    const batchTelegramMsgIds = new Set(
+      sortedUnprocessed.map((m) => (m.telegram_message_id != null ? String(m.telegram_message_id) : "")).filter(Boolean)
+    );
+
     const cleanMessages = sortedUnprocessed
-      .map((message) => preserveBatchText(message.message_text ?? ""))
+      .map((message) => {
+        const rawText = preserveBatchText(message.message_text ?? "");
+        // Detect cross-batch replies: client replied to a message from a previous batch.
+        // If the replied-to message IS in this batch window, its text is already visible in groupedText.
+        const replyTo = getReplyToMessage(message);
+        const replyText = getReplyText(replyTo);
+        const replyTargetId = replyTo?.message_id != null ? String(replyTo.message_id) : null;
+        const isCrossBatchReply = Boolean(replyText && replyTargetId && !batchTelegramMsgIds.has(replyTargetId));
+        if (isCrossBatchReply && rawText) {
+          // Show the quoted original message above the client's reply so Mark sees full context.
+          return `Re: "${replyText}"\n${rawText}`;
+        }
+        return rawText;
+      })
       .filter((text) => text && !isPureNonSupportChatter(text));
     const groupedText = preserveBatchText(cleanMessages.join("\n"));
 
@@ -814,7 +838,7 @@ async function handleBatch(request: Request) {
   const messageStartIso = new Date(Date.now() - MESSAGE_LOOKBACK_MINUTES * 60 * 1000).toISOString();
   const { data: queuedMessagesData, error: queuedMessagesError } = await supabase
     .from("messages")
-    .select("id, created_at, telegram_chat_id, telegram_username, message_text, message_type, raw_payload")
+    .select("id, created_at, telegram_chat_id, telegram_message_id, telegram_username, message_text, message_type, raw_payload")
     .gte("created_at", messageStartIso)
     .lte("created_at", batchCutoffIso)
     .in("message_type", ["client", "client_photo"])
