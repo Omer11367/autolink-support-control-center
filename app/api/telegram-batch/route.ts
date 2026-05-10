@@ -40,9 +40,9 @@ type QueuedMessage = {
 };
 
 // A photo (or image document) that should be forwarded to Mark after the text summary.
+// NEVER include any client-identifying information (chat title, username, etc.) — privacy rule.
 type PhotoForward = {
   fileId: string;
-  chatTitle: string;
   isDeposit: boolean;
 };
 
@@ -175,6 +175,7 @@ function mapIntentToCategory(intent: string | null | undefined): typeof CATEGORY
   if (["payment_issue", "refund_request"].includes(normalized)) return "Payment Issues";
   if (["verify_account"].includes(normalized)) return "Verification";
   if (["check_account_status", "request_data_banned_accounts", "check_policy"].includes(normalized)) return "Account Issues";
+  // site_issue, check_availability, get_spend_report, request_accounts, general_support → General
   return "General";
 }
 
@@ -417,11 +418,29 @@ function buildMarkSummary(tickets: BatchTicket[]): string {
 
 function chooseClientReply(tickets: BatchTicket[]): string {
   const categories = tickets.map((ticket) => mapIntentToCategory(ticket.intent));
-  if (categories.includes("Deposits")) return "Understood, I'll check the deposit and update you.";
-  if (categories.includes("Payment Issues")) return "Got it, I'll check the payment issue and update you.";
-  if (categories.includes("Share") || categories.includes("Unshare")) return "Sure, I'll check this and update you.";
-  if (categories.includes("Verification")) return "Got it, checking the verification request now.";
-  return USE_CLEAN_CLIENT_BATCH_REPLY ? CLEAN_CLIENT_BATCH_REPLY : CLIENT_BATCH_REPLY;
+  const intents = tickets.map((ticket) => String(ticket.intent ?? ""));
+
+  // Priority order: most action-required categories first.
+  if (categories.includes("Deposits")) return "Got it! We received your deposit — we'll verify and confirm shortly.";
+  if (categories.includes("Payment Issues")) return "Got it, we'll look into the payment issue and get back to you.";
+  if (categories.includes("Share") && categories.includes("Unshare")) return "Sure, we'll handle your account requests and update you.";
+  if (categories.includes("Share")) return "Sure, we'll take care of the share request and update you.";
+  if (categories.includes("Unshare")) return "Sure, we'll process the unshare request and update you.";
+  if (categories.includes("Verification")) return "Got it, we'll check the verification and update you.";
+  if (categories.includes("Account Issues")) return "Got it, we'll look into the account issue and update you.";
+
+  // General category — pick a reply based on the specific intent so clients get a useful response.
+  if (intents.some((i) => i === "site_issue")) {
+    return "We're looking into the site issue and will update you shortly.";
+  }
+  if (intents.some((i) => i === "check_availability")) {
+    return "Thanks for reaching out! We'll check on availability and get back to you shortly.";
+  }
+  if (intents.some((i) => i === "get_spend_report")) {
+    return "Got it, we'll pull the report and send it to you shortly.";
+  }
+  // Mixed or truly general
+  return "Got it, we'll look into this and get back to you shortly.";
 }
 
 function escapeTelegramHtml(value: string): string {
@@ -735,6 +754,15 @@ async function createTicketsFromQueuedMessages(
       const isCrossBatchReply = Boolean(replyText && replyTargetId && !batchTelegramMsgIds.has(replyTargetId));
       const text = isCrossBatchReply && rawText ? `Re: "${replyText}"\n${rawText}` : rawText;
 
+      // Photo messages with no real caption (just the bot's placeholder) should NOT be
+      // classified on their own — the placeholder "Image/screenshot sent by client." contains
+      // the word "sent" which falsely triggers deposit detection and creates a duplicate
+      // "deposit sent, please check" ticket alongside the real "sent 50K" ticket.
+      // We skip them here; their file_id is collected later during grouping.
+      const isPhotoWithoutCaption = message.message_type === "client_photo" &&
+        (!text || /^image\/screenshot sent by client\.?$/i.test(text.trim()));
+      if (isPhotoWithoutCaption) continue;
+
       if (!text || isPureNonSupportChatter(text)) continue;
 
       const singleClassification = classifyIntent(text);
@@ -776,15 +804,17 @@ async function createTicketsFromQueuedMessages(
       } else {
         messageGroups.push({ texts: [item.text], messages: [item.message], category: effectiveCategory });
       }
+    }
 
-      // Collect photos so they can be forwarded to Mark after the text summary.
-      const photoFileId = getPhotoFileId(item.message);
-      if (photoFileId) {
-        chatPhotoForwards.push({
-          fileId: photoFileId,
-          chatTitle: getChatTitle(item.message),
-          isDeposit: effectiveCategory === "Deposits"
-        });
+    // Collect photos from ALL messages in this batch (including caption-less photo messages
+    // that were excluded from classification). Only mark them as deposit evidence when the
+    // chat has at least one Deposits group — this prevents random non-receipt screenshots
+    // (marketing images, etc.) from being forwarded to Mark.
+    const chatHasDeposit = messageGroups.some((g) => g.category === "Deposits");
+    for (const message of sortedUnprocessed) {
+      const photoFileId = getPhotoFileId(message);
+      if (photoFileId && chatHasDeposit) {
+        chatPhotoForwards.push({ fileId: photoFileId, isDeposit: true });
       }
     }
 
@@ -1010,17 +1040,16 @@ async function handleBatch(request: Request) {
     response_text: markSummary
   });
 
-  // Forward client photos (deposit screenshots, Etherscan screenshots, etc.) to Mark
-  // as follow-up messages right after the text summary so Mark sees the evidence.
+  // Forward deposit evidence photos to Mark as follow-up messages after the text summary.
+  // Only deposit-related photos are forwarded (non-deposit screenshots are never sent).
+  // NO client-identifying info (group name, username) is included in the caption — privacy rule.
   for (const photo of photoForwards) {
+    if (!photo.isDeposit) continue;
     try {
-      const caption = photo.isDeposit
-        ? `📸 ${escapeTelegramHtml(photo.chatTitle)} — deposit evidence`
-        : `📸 ${escapeTelegramHtml(photo.chatTitle)}`;
-      await maybeSendTelegramPhoto({ chatId: markGroupChatId, fileId: photo.fileId, caption, source: "telegram_batch" });
-      console.log("photo-forwarded-to-mark", { chatTitle: photo.chatTitle, isDeposit: photo.isDeposit });
+      await maybeSendTelegramPhoto({ chatId: markGroupChatId, fileId: photo.fileId, caption: "📸 Deposit screenshot", source: "telegram_batch" });
+      console.log("deposit-photo-forwarded-to-mark");
     } catch (err) {
-      console.error("photo-forward-failed", { chatTitle: photo.chatTitle, error: err instanceof Error ? err.message : "unknown" });
+      console.error("photo-forward-failed", { error: err instanceof Error ? err.message : "unknown" });
     }
   }
 
