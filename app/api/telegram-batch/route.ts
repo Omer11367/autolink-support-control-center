@@ -79,7 +79,10 @@ type LinkedFollowUpContext = {
 };
 
 const CATEGORY_ORDER = ["Share", "Unshare", "Deposits", "Payment Issues", "Verification", "Account Issues", "General"] as const;
-const BATCH_DELAY_MINUTES = 5;
+// Cron fires every 5 min on wall-clock boundaries (:00, :05, :10, …). To make a message
+// sent at 1:03 visible to the 1:05 batch, the eligibility cutoff must be tight (1 min).
+// A message arriving exactly at 1:04 still passes the 1:05 cutoff (lte 1:04 includes equal).
+const BATCH_DELAY_MINUTES = 1;
 const MESSAGE_LOOKBACK_MINUTES = 24 * 60;
 const BATCH_MARKER_TYPES: BatchMarkerType[] = ["batch_client_greeting", "batch_non_request_skipped", "batch_duplicate_skipped"];
 const CLEAN_CLIENT_BATCH_REPLY = "Understood, I'll check and update you.";
@@ -338,11 +341,23 @@ function buildMarkSummary(tickets: BatchTicket[]): string {
   const grouped = new Map<typeof CATEGORY_ORDER[number], string[]>();
   for (const category of CATEGORY_ORDER) grouped.set(category, []);
   for (const ticket of tickets) {
+    const intentCategory = mapIntentToCategory(ticket.intent);
     const actions = getActions(ticket.extracted_data);
+
+    // When the ticket's intent is unambiguously a problem (Payment Issues, Account Issues),
+    // never let an extracted payment_check action drag it into Deposits. The classifier
+    // can falsely tag a long account-id number as an "amount" and produce a payment_check
+    // action — e.g. "i have payment issue on this acocunts 51781181" was being shown as
+    // "* sent 51781181, please check" under DEPOSITS instead of PAYMENT ISSUES.
+    if (intentCategory === "Payment Issues" || intentCategory === "Account Issues") {
+      grouped.get(intentCategory)?.push(cleanTaskText(ticket));
+      continue;
+    }
+
     if (actions.length > 0) {
       for (const action of actions) grouped.get(actionToCategory(action))?.push(cleanActionTaskText(ticket, action));
     } else {
-      grouped.get(mapIntentToCategory(ticket.intent))?.push(cleanTaskText(ticket));
+      grouped.get(intentCategory)?.push(cleanTaskText(ticket));
     }
   }
 
@@ -620,6 +635,7 @@ async function createTicketsFromQueuedMessages(
 
   const createdTickets: BatchTicket[] = [];
   for (const [chatId, chatMessages] of messagesByChat.entries()) {
+    try {
     const { data: latestTicketData, error: latestTicketError } = await supabase
       .from("tickets")
       .select("client_message_id")
@@ -809,6 +825,17 @@ async function createTicketsFromQueuedMessages(
     console.log("request-added-to-mark-batch", { chatId, ticketId: createdTicket.id, intent: classification.intent });
     console.log("client-ack-scheduled", { chatId, ticketId: createdTicket.id });
     createdTickets.push(createdTicket as BatchTicket);
+    } catch (chatError) {
+      // Per-chat isolation: one failing chat must not block other chats from being processed.
+      // Without this, a single bad query (e.g. a duplicate ticket race, a sheets API hiccup)
+      // would silently kill the rest of the batch — symptoms exactly like BluePeak / NovaAds
+      // never getting a reply while Client Test Group did.
+      console.error("chat-batch-failed", {
+        chatId,
+        error: chatError instanceof Error ? chatError.message : "unknown error",
+        stack: chatError instanceof Error ? chatError.stack : undefined
+      });
+    }
   }
 
   return createdTickets;
