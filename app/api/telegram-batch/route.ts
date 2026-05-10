@@ -257,6 +257,7 @@ function cleanTaskText(ticket: BatchTicket): string {
     const bm = formatBm(shareAction?.bm) ?? extractEntityAfter(original, ["bm", "business manager"]);
     if (account && bm) return `share account ${account} to BM ${bm}`;
     if (account) return `share account ${account}`;
+    return original || "share account request";
   }
 
   if (category === "Unshare") {
@@ -265,6 +266,7 @@ function cleanTaskText(ticket: BatchTicket): string {
     const bm = formatBm(unshareAction?.bm) ?? extractEntityAfter(original, ["bm", "business manager"]);
     if (account && bm) return `unshare accounts ${account} from ${bm}`;
     if (account) return `unshare accounts ${account}`;
+    return original || "unshare account request";
   }
 
   if (category === "Deposits") {
@@ -291,7 +293,8 @@ function cleanTaskText(ticket: BatchTicket): string {
     return account ? `account issue on account ${account}` : "account issue reported";
   }
 
-  if (/\b(available|availability|stock)\b/i.test(original)) return "asked if accounts are available";
+  // Return the full original message so multi-question groups (e.g. "monthly reports?" +
+  // "accounts in stock?") are never collapsed into a single-topic summary that loses questions.
   return original || "General support request";
 }
 
