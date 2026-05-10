@@ -3,13 +3,25 @@ import { createClient, type SupabaseClient } from "@supabase/supabase-js";
 import { classifyIntent } from "@/lib/intent-classifier";
 import { formatIntentLabel } from "@/lib/display";
 import { writeClientRequestRowToGoogleSheet } from "@/lib/google-sheets";
-import { maybeSendTelegramMessage } from "@/lib/telegram";
+import { maybeSendTelegramMessage, maybeSendTelegramPhoto } from "@/lib/telegram";
 import type { Database } from "@/lib/supabase/database.types";
 
 type TelegramReplyToMessage = {
   message_id?: number;
   text?: string;
   caption?: string;
+};
+
+type TelegramPhotoSize = { file_id: string; width?: number; height?: number; file_size?: number };
+type TelegramDocument = { file_id: string; mime_type?: string; file_name?: string };
+
+type TelegramMessageFields = {
+  date?: number;
+  chat?: { id?: number; title?: string };
+  from?: { username?: string };
+  reply_to_message?: TelegramReplyToMessage;
+  photo?: TelegramPhotoSize[];
+  document?: TelegramDocument;
 };
 
 type QueuedMessage = {
@@ -21,25 +33,17 @@ type QueuedMessage = {
   message_text: string | null;
   message_type: string | null;
   raw_payload: {
-    message?: {
-      date?: number;
-      chat?: { id?: number; title?: string };
-      from?: { username?: string };
-      reply_to_message?: TelegramReplyToMessage;
-    };
-    edited_message?: {
-      date?: number;
-      chat?: { id?: number; title?: string };
-      from?: { username?: string };
-      reply_to_message?: TelegramReplyToMessage;
-    };
-    channel_post?: {
-      date?: number;
-      chat?: { id?: number; title?: string };
-      from?: { username?: string };
-      reply_to_message?: TelegramReplyToMessage;
-    };
+    message?: TelegramMessageFields;
+    edited_message?: TelegramMessageFields;
+    channel_post?: TelegramMessageFields;
   } | null;
+};
+
+// A photo (or image document) that should be forwarded to Mark after the text summary.
+type PhotoForward = {
+  fileId: string;
+  chatTitle: string;
+  isDeposit: boolean;
 };
 
 type BatchTicket = {
@@ -224,6 +228,32 @@ function extractAmount(text: string): string | null {
   return match?.[0] ? compactText(match[0]).replace(/\s+/g, "") : null;
 }
 
+function extractFirstUrl(text: string): string | null {
+  const match = text.match(/https?:\/\/[^\s<>"]+/);
+  return match?.[0] ?? null;
+}
+
+// Returns true when the message text is nothing but a URL (possibly with surrounding whitespace).
+// Used during grouping so "sent 30K" + "https://etherscan.io/..." stay in the same Deposits group
+// instead of splitting into Deposits + General.
+function isUrlOnlyText(text: string): boolean {
+  return /^https?:\/\/[^\s]+$/.test(text.trim());
+}
+
+// Extracts the largest available photo file_id from a Telegram message payload,
+// or the file_id of an image document. Returns null if there is no photo.
+function getPhotoFileId(message: QueuedMessage): string | null {
+  const tgMsg = getTelegramMessage(message.raw_payload);
+  if (tgMsg?.photo && tgMsg.photo.length > 0) {
+    // Telegram provides multiple sizes; the last one is always the largest.
+    return tgMsg.photo[tgMsg.photo.length - 1].file_id;
+  }
+  if (tgMsg?.document?.file_id && tgMsg.document.mime_type?.toLowerCase().startsWith("image/")) {
+    return tgMsg.document.file_id;
+  }
+  return null;
+}
+
 function extractEntityAfter(text: string, labels: string[]): string | null {
   const labelPattern = labels.map((label) => label.replace(/\s+/g, "\\s+")).join("|");
   const match = text.match(new RegExp(`\\b(?:${labelPattern})\\b\\s*[:#-]?\\s*([A-Za-z0-9_-]+)`, "i"));
@@ -279,7 +309,10 @@ function cleanTaskText(ticket: BatchTicket): string {
 
   if (category === "Deposits") {
     const amount = paymentAction?.amount ?? extractAmount(original);
-    return amount ? `sent ${amount}, please check` : "deposit sent, please check";
+    const url = extractFirstUrl(original);
+    const baseText = amount ? `sent ${amount}, please check` : "deposit sent, please check";
+    // Append the Etherscan / blockchain link so Mark can click it directly from the summary.
+    return url ? `${baseText}\n${url}` : baseText;
   }
 
   if (category === "Payment Issues") {
@@ -625,7 +658,7 @@ async function markChatBatchProcessed(
 async function createTicketsFromQueuedMessages(
   supabase: SupabaseAdminClient,
   messages: QueuedMessage[]
-): Promise<BatchTicket[]> {
+): Promise<{ tickets: BatchTicket[]; photoForwards: PhotoForward[] }> {
   const messagesByChat = new Map<string, QueuedMessage[]>();
   for (const message of messages) {
     if (!message.telegram_chat_id) continue;
@@ -634,6 +667,7 @@ async function createTicketsFromQueuedMessages(
   }
 
   const createdTickets: BatchTicket[] = [];
+  const allPhotoForwards: PhotoForward[] = [];
   for (const [chatId, chatMessages] of messagesByChat.entries()) {
     try {
     const { data: latestTicketData, error: latestTicketError } = await supabase
@@ -726,15 +760,31 @@ async function createTicketsFromQueuedMessages(
     // ── Step 3: group consecutive messages that share the same category ─────────────────────────
     // Consecutive messages belonging to the same category are merged (e.g. two lines of a share
     // request). A category switch starts a new group (e.g. General → Share → General).
+    // Special rule: a message that is ONLY a URL (e.g. an Etherscan link following "sent 30K")
+    // inherits the previous group's category so the link stays with the deposit, not General.
     type MessageGroup = { texts: string[]; messages: QueuedMessage[]; category: typeof CATEGORY_ORDER[number] };
     const messageGroups: MessageGroup[] = [];
+    const chatPhotoForwards: PhotoForward[] = [];
+
     for (const item of perMessageItems) {
       const lastGroup = messageGroups[messageGroups.length - 1];
-      if (lastGroup && lastGroup.category === item.category) {
+      // URL-only messages (Etherscan links etc.) belong to whatever came before them.
+      const effectiveCategory = (lastGroup && isUrlOnlyText(item.text)) ? lastGroup.category : item.category;
+      if (lastGroup && lastGroup.category === effectiveCategory) {
         lastGroup.texts.push(item.text);
         lastGroup.messages.push(item.message);
       } else {
-        messageGroups.push({ texts: [item.text], messages: [item.message], category: item.category });
+        messageGroups.push({ texts: [item.text], messages: [item.message], category: effectiveCategory });
+      }
+
+      // Collect photos so they can be forwarded to Mark after the text summary.
+      const photoFileId = getPhotoFileId(item.message);
+      if (photoFileId) {
+        chatPhotoForwards.push({
+          fileId: photoFileId,
+          chatTitle: getChatTitle(item.message),
+          isDeposit: effectiveCategory === "Deposits"
+        });
       }
     }
 
@@ -865,6 +915,12 @@ async function createTicketsFromQueuedMessages(
     if (ticketsCreatedForChat === 0) {
       await markChatBatchProcessed(supabase, chatId, "batch_non_request_skipped", "no-action batch skipped", null, lastMessageMs);
     }
+
+    // Accumulate photo forwards for this chat (only when at least one ticket was created,
+    // so we don't spam Mark with photos from non-support messages).
+    if (ticketsCreatedForChat > 0) {
+      allPhotoForwards.push(...chatPhotoForwards);
+    }
     } catch (chatError) {
       // Per-chat isolation: one failing chat must not block other chats from being processed.
       // Without this, a single bad query (e.g. a duplicate ticket race, a sheets API hiccup)
@@ -878,7 +934,7 @@ async function createTicketsFromQueuedMessages(
     }
   }
 
-  return createdTickets;
+  return { tickets: createdTickets, photoForwards: allPhotoForwards };
 }
 
 async function handleBatch(request: Request) {
@@ -913,7 +969,7 @@ async function handleBatch(request: Request) {
     .limit(500);
   if (queuedMessagesError) throw new Error(`Supabase queued messages query failed: ${queuedMessagesError.message}`);
 
-  const createdTickets = await createTicketsFromQueuedMessages(supabase, (queuedMessagesData ?? []) as unknown as QueuedMessage[]);
+  const { tickets: createdTickets, photoForwards } = await createTicketsFromQueuedMessages(supabase, (queuedMessagesData ?? []) as unknown as QueuedMessage[]);
 
   const { data, error } = await supabase
     .from("tickets")
@@ -953,6 +1009,20 @@ async function handleBatch(request: Request) {
     response_type: "batch_mark_summary",
     response_text: markSummary
   });
+
+  // Forward client photos (deposit screenshots, Etherscan screenshots, etc.) to Mark
+  // as follow-up messages right after the text summary so Mark sees the evidence.
+  for (const photo of photoForwards) {
+    try {
+      const caption = photo.isDeposit
+        ? `📸 ${escapeTelegramHtml(photo.chatTitle)} — deposit evidence`
+        : `📸 ${escapeTelegramHtml(photo.chatTitle)}`;
+      await maybeSendTelegramPhoto({ chatId: markGroupChatId, fileId: photo.fileId, caption, source: "telegram_batch" });
+      console.log("photo-forwarded-to-mark", { chatTitle: photo.chatTitle, isDeposit: photo.isDeposit });
+    } catch (err) {
+      console.error("photo-forward-failed", { chatTitle: photo.chatTitle, error: err instanceof Error ? err.message : "unknown" });
+    }
+  }
 
   const ticketsByClient = new Map<string, BatchTicket[]>();
   for (const ticket of tickets) {

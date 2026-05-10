@@ -6,6 +6,13 @@ type SendTelegramMessageInput = {
   source?: "telegram_batch" | "manual_action";
 };
 
+type SendTelegramPhotoInput = {
+  chatId: string | number;
+  fileId: string;
+  caption?: string;
+  source?: "telegram_batch" | "manual_action";
+};
+
 export async function maybeSendTelegramMessage({ chatId, text, source }: SendTelegramMessageInput) {
   const token = process.env.TELEGRAM_BOT_TOKEN;
 
@@ -46,5 +53,36 @@ export async function maybeSendTelegramMessage({ chatId, text, source }: SendTel
     sent: true,
     telegramMessageId: payload.result?.message_id ?? null,
     reason: null
+  };
+}
+
+export async function maybeSendTelegramPhoto({ chatId, fileId, caption, source }: SendTelegramPhotoInput) {
+  if (source !== "telegram_batch") {
+    return { sent: false, telegramMessageId: null as number | null };
+  }
+
+  const token = process.env.TELEGRAM_BOT_TOKEN;
+  if (!token || !chatId || !fileId) {
+    return { sent: false, telegramMessageId: null as number | null };
+  }
+
+  const response = await fetch(`https://api.telegram.org/bot${token}/sendPhoto`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      chat_id: chatId,
+      photo: fileId,
+      ...(caption ? { caption, parse_mode: "HTML" } : {})
+    })
+  });
+
+  const payload = await response.json();
+  if (!response.ok || !payload.ok) {
+    throw new Error(payload.description ?? "Telegram sendPhoto failed.");
+  }
+
+  return {
+    sent: true,
+    telegramMessageId: payload.result?.message_id ?? null
   };
 }
