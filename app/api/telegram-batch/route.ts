@@ -689,7 +689,7 @@ type ChatError = { chatId: string; error: string };
 async function createTicketsFromQueuedMessages(
   supabase: SupabaseAdminClient,
   messages: QueuedMessage[]
-): Promise<{ tickets: BatchTicket[]; photoForwards: PhotoForward[]; chatErrors: ChatError[] }> {
+): Promise<{ tickets: BatchTicket[]; photoForwards: PhotoForward[]; chatErrors: ChatError[]; chatDuplicateIntents: Map<string, string[]> }> {
   const messagesByChat = new Map<string, QueuedMessage[]>();
   for (const message of messages) {
     if (!message.telegram_chat_id) continue;
@@ -700,6 +700,7 @@ async function createTicketsFromQueuedMessages(
   const createdTickets: BatchTicket[] = [];
   const allPhotoForwards: PhotoForward[] = [];
   const chatErrors: ChatError[] = [];
+  const chatDuplicateIntents = new Map<string, string[]>();
   for (const [chatId, chatMessages] of messagesByChat.entries()) {
     try {
     const { data: latestTicketData, error: latestTicketError } = await supabase
@@ -896,6 +897,8 @@ async function createTicketsFromQueuedMessages(
       if (duplicateTicket?.id) {
         console.log("duplicate-batch-prevented", { chatId, ticketId: duplicateTicket.id });
         ticketsCreatedForChat++; // count as handled so we don't add a spurious skip marker
+        // Track the intent so duplicate-only chats can still receive a client reply.
+        chatDuplicateIntents.set(chatId, [...(chatDuplicateIntents.get(chatId) ?? []), classification.intent ?? "general_support"]);
         continue;
       }
 
@@ -985,7 +988,7 @@ async function createTicketsFromQueuedMessages(
     }
   }
 
-  return { tickets: createdTickets, photoForwards: allPhotoForwards, chatErrors };
+  return { tickets: createdTickets, photoForwards: allPhotoForwards, chatErrors, chatDuplicateIntents };
 }
 
 async function handleBatch(request: Request) {
@@ -1020,7 +1023,7 @@ async function handleBatch(request: Request) {
     .limit(500);
   if (queuedMessagesError) throw new Error(`Supabase queued messages query failed: ${queuedMessagesError.message}`);
 
-  const { tickets: createdTickets, photoForwards, chatErrors } = await createTicketsFromQueuedMessages(supabase, (queuedMessagesData ?? []) as unknown as QueuedMessage[]);
+  const { tickets: createdTickets, photoForwards, chatErrors, chatDuplicateIntents } = await createTicketsFromQueuedMessages(supabase, (queuedMessagesData ?? []) as unknown as QueuedMessage[]);
   if (chatErrors.length > 0) {
     console.error("batch-had-chat-errors", { count: chatErrors.length, errors: chatErrors });
   }
@@ -1092,6 +1095,24 @@ async function handleBatch(request: Request) {
     ticketsByClient.set(key, [...(ticketsByClient.get(key) ?? []), ticket]);
   }
 
+  // Chats where every message was a duplicate (no new ticket created) still need a reply
+  // so the client doesn't feel ignored. Synthesise a minimal ticket-like entry per duplicate
+  // chat so it enters the reply loop — only if the chat doesn't already have a real ticket entry.
+  for (const [dupChatId, intents] of chatDuplicateIntents.entries()) {
+    if (ticketsByClient.has(dupChatId)) continue; // real ticket already covers this chat
+    ticketsByClient.set(dupChatId, intents.map((intent, i) => ({
+      id: `dup-${dupChatId}-${i}`,
+      intent,
+      client_chat_id: dupChatId,
+      client_original_message: null,
+      extracted_data: null,
+      internal_summary: null,
+      created_at: null,
+      holding_message_id: null
+    })));
+    console.log("duplicate-only-chat-queued-for-reply", { dupChatId, intents });
+  }
+
   let clientReplyCount = 0;
   for (const [clientChatId, clientTickets] of ticketsByClient.entries()) {
     try {
@@ -1099,20 +1120,27 @@ async function handleBatch(request: Request) {
       const clientSendResult = await maybeSendTelegramMessage({ chatId: clientChatId, text: clientReply, source: "telegram_batch" });
       clientReplyCount += 1;
 
+      // Synthetic duplicate-only tickets have ids like "dup-chatId-0" — not real DB rows.
+      // Filter them out before any Supabase write to avoid UUID validation errors.
+      const realTickets = clientTickets.filter((t) => !t.id.startsWith("dup-"));
+      const firstRealId = realTickets[0]?.id ?? null;
+
       await supabase.from("bot_responses").insert({
-        ticket_id: clientTickets[0]?.id ?? null,
+        ticket_id: firstRealId,
         telegram_chat_id: clientChatId,
         telegram_message_id: clientSendResult.telegramMessageId,
         response_type: "batch_client_reply",
         response_text: clientReply
       });
 
-      await supabase
-        .from("tickets")
-        .update({ holding_message_id: clientSendResult.telegramMessageId, updated_at: new Date().toISOString() })
-        .in("id", clientTickets.map((ticket) => ticket.id))
-        .is("holding_message_id", null);
-      console.log("client-ack-sent", { clientChatId, ticketCount: clientTickets.length });
+      if (realTickets.length > 0) {
+        await supabase
+          .from("tickets")
+          .update({ holding_message_id: clientSendResult.telegramMessageId, updated_at: new Date().toISOString() })
+          .in("id", realTickets.map((ticket) => ticket.id))
+          .is("holding_message_id", null);
+      }
+      console.log("client-ack-sent", { clientChatId, ticketCount: clientTickets.length, realTicketCount: realTickets.length });
     } catch (error) {
       console.error("telegram-batch-client-reply-error", {
         clientChatId,
