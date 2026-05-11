@@ -144,7 +144,13 @@ function isPureNonSupportChatter(text: string): boolean {
 
 function isGreetingText(text: string): boolean {
   const normalized = normalizeComparableText(text);
-  return ["hi", "hello", "hey", "yo", "good morning", "good evening", "good night"].includes(normalized);
+  if (["hi", "hello", "hey", "yo", "good morning", "good evening", "good night"].includes(normalized)) return true;
+  // Social greetings: "how are you", "how are you guys", "what's up", etc.
+  const trimmed = text.trim();
+  if (/^how (are|r) (you|u|ya|yall|y'?all|you\s+guys|you\s+all|you\s+doing|everybody|everyone)/i.test(trimmed)) return true;
+  if (/^how'?s (it going|everything|things|life|business)/i.test(trimmed)) return true;
+  if (/^(what'?s up|wyd|wassup|sup guys)/i.test(trimmed)) return true;
+  return false;
 }
 
 function hasRequestSignal(text: string): boolean {
@@ -442,8 +448,16 @@ function buildMarkSummary(tickets: BatchTicket[]): string {
 function chooseClientReply(tickets: BatchTicket[]): string {
   const categories = tickets.map((ticket) => mapIntentToCategory(ticket.intent));
   const intents = tickets.map((ticket) => String(ticket.intent ?? ""));
+  const uniqueCategories = [...new Set(categories)];
 
-  // Priority order: most action-required categories first.
+  // When the client asked about multiple DIFFERENT categories in one batch (e.g. "do you have
+  // accounts available?" + "please share 123 to BM 456"), picking one category-specific reply
+  // silently ignores the other question. Use a neutral combined reply that covers everything.
+  if (uniqueCategories.length > 1) {
+    return "Got it, we'll handle your requests and get back to you shortly.";
+  }
+
+  // Single category — pick a tailored reply.
   if (categories.includes("Deposits")) return "Got it! We received your deposit — we'll verify and confirm shortly.";
   if (categories.includes("Payment Issues")) return "Got it, we'll look into the payment issue and get back to you.";
   if (categories.includes("Share") && categories.includes("Unshare")) return "Sure, we'll handle your account requests and update you.";
@@ -454,10 +468,8 @@ function chooseClientReply(tickets: BatchTicket[]): string {
 
   // General category — when there are multiple DIFFERENT intents the client asked about several
   // separate topics in one batch. Picking one intent-specific reply silently ignores the rest.
-  // Use a neutral reply so every question is acknowledged without over-promising on any one.
-  const allGeneral = categories.every((c) => c === "General");
-  const uniqueGeneralIntents = intents.filter((_, i) => categories[i] === "General");
-  if (allGeneral && new Set(uniqueGeneralIntents).size > 1) {
+  const uniqueGeneralIntents = [...new Set(intents)];
+  if (uniqueGeneralIntents.length > 1) {
     return "Got it, let me check and I'll get back to you.";
   }
 
@@ -515,6 +527,19 @@ function chooseGreetingReply(messages: QueuedMessage[]): string {
   const text = messages.map((message) => message.message_text ?? "").join(" ");
   if (/good morning/i.test(text)) return "Good morning, how can I help?";
   if (/good evening|good night/i.test(text)) return "Good evening, how can I help?";
+  // "How are you?" / "How are you guys?" — reply warmly with an offer to help.
+  if (/how (are|r) (you|u|ya|yall|y'?all|you\s+guys)/i.test(text)) {
+    const replies = [
+      "Hey! All good here, how can I help you today?",
+      "Hey! Doing great, thanks! How can I help?",
+      "Hi! We're doing well, what can I do for you?",
+      "Hey! All good, how can we help you today?"
+    ];
+    return replies[Math.floor(Math.random() * replies.length)] ?? replies[0]!;
+  }
+  if (/what'?s up|wassup|sup/i.test(text)) {
+    return "Hey! What can I help you with?";
+  }
   return "Hi, how can I help?";
 }
 

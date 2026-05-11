@@ -100,31 +100,79 @@ function intentToCategory(intent: string | null): string {
   return "General";
 }
 
-// Decides whether an employee's reply message is relevant to a specific client's tickets.
-// Used when the batch contained requests from multiple clients: routes the reply only to
-// the client(s) whose topic the employee is addressing.
+// Category keyword patterns — used both for relevance checking and per-sentence extraction.
+const CATEGORY_KEYWORDS: Record<string, RegExp> = {
+  Deposits: /\b(deposit|funds?|confirmed|wallet|added|money|usdt|usd|transferred|crypto)\b/i,
+  Share: /\b(shar(ed?|ing)|access\s+grant(ed)?|added?\s+(to\s+)?bm|link(ed)?|connected)\b/i,
+  Unshare: /\b(unshar(ed?|ing)|remov(ed?|ing)|access\s+revok(ed)?|unlink(ed)?)\b/i,
+  Verification: /\b(verif(ied|ication)?|card\s+check(ed)?)\b/i,
+  "Payment Issues": /\b(payment|card|billing|charge|invoice|debt|balance)\b/i,
+  "Account Issues": /\b(account|disabled|enabled|restor(ed)?|banned|blocked)\b/i,
+  General: /\b(available|availability|stock|report|spend|site|error|issue|working|check)\b/i
+};
+
+// Returns true when any part of the employee's text is relevant to this client's tickets.
 function isRelevantForClient(
   employeeLower: string,
   tickets: Array<{ intent: string | null; chatTitle: string | null }>
 ): boolean {
-  // 1. Check if the employee mentioned the client's group name.
   for (const t of tickets) {
     const title = (t.chatTitle ?? "").toLowerCase();
     if (title && employeeLower.includes(title)) return true;
   }
-
-  // 2. Match by category keywords in the employee's reply.
   const categories = tickets.map((t) => intentToCategory(t.intent));
-  if (categories.includes("Deposits") && /\b(deposit|funds?|payment|confirmed|wallet|added|money|usdt|usd|transferred|crypto)\b/.test(employeeLower)) return true;
-  if (categories.includes("Share") && /\b(shar(ed?|ing)|access\s+grant(ed)?|added?\s+(to\s+)?bm|link(ed)?|connected)\b/.test(employeeLower)) return true;
-  if (categories.includes("Unshare") && /\b(unshar(ed?|ing)|remov(ed?|ing)|access\s+revok(ed)?|unlink(ed)?)\b/.test(employeeLower)) return true;
-  if (categories.includes("Verification") && /\b(verif(ied|ication)?|card\s+check(ed)?)\b/.test(employeeLower)) return true;
-  if (categories.includes("Payment Issues") && /\b(payment|card|billing|charge|invoice)\b/.test(employeeLower)) return true;
-  if (categories.includes("Account Issues") && /\b(account|disabled|enabled|restor(ed)?|banned|blocked)\b/.test(employeeLower)) return true;
-  // General questions: forward if the reply is a substantive sentence (>15 chars).
+  for (const cat of categories) {
+    const pattern = CATEGORY_KEYWORDS[cat];
+    if (pattern && pattern.test(employeeLower)) return true;
+  }
   if (categories.includes("General") && employeeLower.length > 15) return true;
-
   return false;
+}
+
+// Extracts only the sentences from an employee's message that are relevant to a specific
+// client's ticket categories. When the employee answers multiple questions in one message
+// (e.g. "Accounts available for grant. Deposit of 60K confirmed."), each client should
+// only receive the portion that answers THEIR question — not the entire message.
+function extractRelevantAnswer(
+  fullMessage: string,
+  tickets: Array<{ intent: string | null; chatTitle: string | null }>
+): string | null {
+  // Split into sentences by period/exclamation/question followed by space, or by newlines.
+  const sentences = fullMessage
+    .split(/(?<=[.!?])\s+|\n+/)
+    .map((s) => s.trim())
+    .filter((s) => s.length > 0);
+
+  // Single sentence → use simple relevance check (no splitting possible).
+  if (sentences.length <= 1) {
+    return isRelevantForClient(fullMessage.toLowerCase(), tickets) ? fullMessage.trim() : null;
+  }
+
+  const categories = [...new Set(tickets.map((t) => intentToCategory(t.intent)))];
+  const relevant: string[] = [];
+
+  for (const sentence of sentences) {
+    const lower = sentence.toLowerCase();
+    let matched = false;
+
+    // Check if this sentence mentions the client's group name.
+    for (const t of tickets) {
+      const title = (t.chatTitle ?? "").toLowerCase();
+      if (title && lower.includes(title)) { matched = true; break; }
+    }
+
+    // Check by category keywords.
+    if (!matched) {
+      for (const cat of categories) {
+        const pattern = CATEGORY_KEYWORDS[cat];
+        if (pattern && pattern.test(lower)) { matched = true; break; }
+      }
+    }
+
+    if (matched) relevant.push(sentence);
+  }
+
+  return relevant.length > 0 ? relevant.join(" ") : null;
 }
 
 export async function GET() {
@@ -162,15 +210,17 @@ export async function POST(request: Request) {
     const chatId = message.chat.id;
 
     // ── Employee message from Mark's internal group ──────────────────────────────────────────────
-    // When an employee replies to the batch summary, the bot analyzes their text and forwards
-    // it to the right client group(s).
+    // When an employee answers in Mark's group, the bot analyzes their text and forwards
+    // the relevant portion to the right client group(s).
     //
     // How routing works:
-    //  1. Employee must use Telegram's Reply feature on the batch summary message.
+    //  1. Employee can Reply to the batch summary (preferred) OR just type in the group.
+    //     Standalone messages are matched against the most recent batch summary (24h lookback).
     //  2. The bot looks up all tickets that share that summary's internal_message_id.
     //  3. Holding acks ("got it", "we'll check", etc.) are ignored — client already has that.
-    //  4. Real answers are matched to the relevant client(s) by category keywords or group name.
-    //  5. The message is forwarded to each matched client group.
+    //  4. For multi-client batches, the message is split into sentences and each client only
+    //     receives the sentences relevant to THEIR ticket category (smart extraction).
+    //  5. Single-client batches receive the full employee message.
     if (String(chatId) === String(markGroupChatId)) {
       const employeeText = (message.text ?? message.caption ?? "").trim();
       if (!employeeText) {
@@ -234,24 +284,37 @@ export async function POST(request: Request) {
         byClient.set(key, [...(byClient.get(key) ?? []), { id: t.id, intent: t.intent, chatTitle: chatTitle || null }]);
       }
 
-      // Determine which clients should receive this employee message.
-      // If there is only one client in the batch → always forward.
-      // If multiple → match by category keywords or group name mention.
-      const employeeLower = employeeText.toLowerCase();
-      const clientsToForward: string[] = [];
+      // Determine which clients should receive this employee message and WHAT text each gets.
+      //
+      // Single client in batch → forward full message (all answers are for them).
+      // Multiple clients → extract only the relevant portion for each client so they don't
+      //   see answers meant for other clients.
+      //
+      // Example: employee writes "Accounts available for grant. Deposit of 60K confirmed."
+      //   → Client A (asked about availability) gets only "Accounts available for grant."
+      //   → Client B (asked about deposit) gets only "Deposit of 60K confirmed."
+      type ForwardTarget = { chatId: string; text: string };
+      const targets: ForwardTarget[] = [];
 
       if (byClient.size === 1) {
-        clientsToForward.push(...byClient.keys());
+        // Only one client — send the full employee message.
+        const clientChatId = [...byClient.keys()][0]!;
+        targets.push({ chatId: clientChatId, text: employeeText });
       } else {
+        // Multiple clients — extract relevant portions per client.
         for (const [clientChatId, clientTickets] of byClient.entries()) {
-          if (isRelevantForClient(employeeLower, clientTickets)) {
-            clientsToForward.push(clientChatId);
+          const relevantText = extractRelevantAnswer(employeeText, clientTickets);
+          if (relevantText) {
+            targets.push({ chatId: clientChatId, text: relevantText });
+            console.log("mark-reply-extracted-for-client", { clientChatId, originalLen: employeeText.length, extractedLen: relevantText.length });
           }
         }
-        // Fallback: if routing could not determine any specific client, forward to all.
-        if (clientsToForward.length === 0) {
-          console.log("mark-reply-routing-fallback-all-clients", { clientCount: byClient.size });
-          clientsToForward.push(...byClient.keys());
+        // Fallback: if extraction matched no sentences for any client, forward full message to all.
+        if (targets.length === 0) {
+          console.log("mark-reply-extraction-fallback-all-clients", { clientCount: byClient.size });
+          for (const clientChatId of byClient.keys()) {
+            targets.push({ chatId: clientChatId, text: employeeText });
+          }
         }
       }
 
@@ -262,27 +325,27 @@ export async function POST(request: Request) {
       }
 
       const forwardedTo: string[] = [];
-      for (const clientChatId of clientsToForward) {
+      for (const target of targets) {
         try {
           const res = await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({
-              chat_id: clientChatId,
-              text: employeeText,
+              chat_id: target.chatId,
+              text: target.text,
               parse_mode: "HTML",
               disable_web_page_preview: true
             })
           });
           const payload = await res.json();
           if (res.ok && payload.ok) {
-            forwardedTo.push(clientChatId);
-            console.log("mark-reply-forwarded", { clientChatId, forwardedMsgId: payload.result?.message_id });
+            forwardedTo.push(target.chatId);
+            console.log("mark-reply-forwarded", { clientChatId: target.chatId, forwardedMsgId: payload.result?.message_id });
           } else {
-            console.error("mark-reply-forward-failed", { clientChatId, error: payload.description });
+            console.error("mark-reply-forward-failed", { clientChatId: target.chatId, error: payload.description });
           }
         } catch (fwdErr) {
-          console.error("mark-reply-forward-error", { clientChatId, error: fwdErr instanceof Error ? fwdErr.message : "unknown" });
+          console.error("mark-reply-forward-error", { clientChatId: target.chatId, error: fwdErr instanceof Error ? fwdErr.message : "unknown" });
         }
       }
 
