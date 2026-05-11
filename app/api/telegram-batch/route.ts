@@ -135,7 +135,11 @@ function isPureNonSupportChatter(text: string): boolean {
   const normalized = normalizeComparableText(text);
   const reactionOnly = /^[\s\u{1F44D}\u2764\uFE0F\u2705\u{1F64F}]+$/u.test(text.trim());
   const chatter = ["hi", "hello", "hey", "yo", "good morning", "good evening", "good night", "thanks", "thank you", "thx", "ty", "ok", "okay", "alright", "received", "noted"];
-  return reactionOnly || chatter.includes(normalized);
+  // Social greetings that are clearly not support requests: "how are you guys?", "how r u", "how's it going" etc.
+  const isSocialGreeting = /^how (are|r) (you|u|ya|yall|y'?all|you\s+guys|you\s+all|you\s+doing|everybody|everyone)/i.test(text.trim())
+    || /^how'?s (it going|everything|things|life|business)/i.test(text.trim())
+    || /^(what'?s up|wyd|wassup|sup guys)/i.test(text.trim());
+  return reactionOnly || chatter.includes(normalized) || isSocialGreeting;
 }
 
 function isGreetingText(text: string): boolean {
@@ -848,14 +852,14 @@ async function createTicketsFromQueuedMessages(
     }
 
     // Collect photos from ALL messages in this batch (including caption-less photo messages
-    // that were excluded from classification). Only mark them as deposit evidence when the
-    // chat has at least one Deposits group — this prevents random non-receipt screenshots
-    // (marketing images, etc.) from being forwarded to Mark.
+    // that were excluded from classification). Forward to Mark as follow-ups after the text
+    // summary — deposit photos get a "Deposit screenshot" caption, other photos (e.g. error
+    // screenshots sent by the client) get a generic "Client screenshot" caption.
     const chatHasDeposit = messageGroups.some((g) => g.category === "Deposits");
     for (const message of sortedUnprocessed) {
       const photoFileId = getPhotoFileId(message);
-      if (photoFileId && chatHasDeposit) {
-        chatPhotoForwards.push({ fileId: photoFileId, isDeposit: true });
+      if (photoFileId) {
+        chatPhotoForwards.push({ fileId: photoFileId, isDeposit: chatHasDeposit });
       }
     }
 
@@ -1098,14 +1102,14 @@ async function handleBatch(request: Request) {
     response_text: markSummary
   });
 
-  // Forward deposit evidence photos to Mark as follow-up messages after the text summary.
-  // Only deposit-related photos are forwarded (non-deposit screenshots are never sent).
-  // NO client-identifying info (group name, username) is included in the caption — privacy rule.
+  // Forward all client photos to Mark as follow-up messages after the text summary.
+  // Deposit photos get a specific caption; other screenshots (e.g. error reports) get a
+  // generic caption. NO client-identifying info included in captions — privacy rule.
   for (const photo of photoForwards) {
-    if (!photo.isDeposit) continue;
     try {
-      await maybeSendTelegramPhoto({ chatId: markGroupChatId, fileId: photo.fileId, caption: "📸 Deposit screenshot", source: "telegram_batch" });
-      console.log("deposit-photo-forwarded-to-mark");
+      const caption = photo.isDeposit ? "📸 Deposit screenshot" : "📸 Client screenshot";
+      await maybeSendTelegramPhoto({ chatId: markGroupChatId, fileId: photo.fileId, caption, source: "telegram_batch" });
+      console.log("photo-forwarded-to-mark", { isDeposit: photo.isDeposit });
     } catch (err) {
       console.error("photo-forward-failed", { error: err instanceof Error ? err.message : "unknown" });
     }

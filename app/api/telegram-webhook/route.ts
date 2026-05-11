@@ -172,14 +172,6 @@ export async function POST(request: Request) {
     //  4. Real answers are matched to the relevant client(s) by category keywords or group name.
     //  5. The message is forwarded to each matched client group.
     if (String(chatId) === String(markGroupChatId)) {
-      const replyToMsgId = message.reply_to_message?.message_id;
-
-      // Only forward replies — standalone messages in Mark's group are ignored.
-      if (!replyToMsgId) {
-        console.log("mark-group-non-reply-skipped", { messageId: message.message_id });
-        return NextResponse.json({ ok: true, ignored: "mark_group_non_reply" });
-      }
-
       const employeeText = (message.text ?? message.caption ?? "").trim();
       if (!employeeText) {
         return NextResponse.json({ ok: true, ignored: "empty" });
@@ -189,6 +181,35 @@ export async function POST(request: Request) {
       if (isEmployeeHoldingAck(employeeText)) {
         console.log("mark-employee-holding-ack-ignored", { messageId: message.message_id });
         return NextResponse.json({ ok: true, ignored: "holding_ack" });
+      }
+
+      // Resolve the batch summary message_id to look up tickets.
+      // Prefer an explicit Telegram reply (the employee tapped Reply on the summary).
+      // Fall back to the most recent batch summary sent to this group — this handles the
+      // common case where the employee just types a response without using the Reply feature.
+      let replyToMsgId: number | null = message.reply_to_message?.message_id ?? null;
+
+      if (!replyToMsgId) {
+        const lookbackIso = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
+        const { data: latestSummary } = await supabase
+          .from("bot_responses")
+          .select("telegram_message_id")
+          .eq("telegram_chat_id", String(markGroupChatId))
+          .eq("response_type", "batch_mark_summary")
+          .gte("created_at", lookbackIso)
+          .order("created_at", { ascending: false })
+          .limit(1)
+          .maybeSingle();
+        const rawMsgId = (latestSummary as { telegram_message_id?: string | number | null } | null)?.telegram_message_id;
+        replyToMsgId = rawMsgId != null ? Number(rawMsgId) : null;
+        if (replyToMsgId) {
+          console.log("mark-employee-standalone-message-using-latest-summary", { replyToMsgId, messageId: message.message_id });
+        }
+      }
+
+      if (!replyToMsgId) {
+        console.log("mark-group-no-summary-to-route-against", { messageId: message.message_id });
+        return NextResponse.json({ ok: true, ignored: "no_summary_found" });
       }
 
       // Find all tickets from this batch (they all share the same internal_message_id = batch summary msg id).
