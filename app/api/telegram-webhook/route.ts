@@ -106,9 +106,13 @@ const CATEGORY_KEYWORDS: Record<string, RegExp> = {
   Share: /\b(shar(ed?|ing)|access\s+grant(ed)?|added?\s+(to\s+)?bm|link(ed)?|connected)\b/i,
   Unshare: /\b(unshar(ed?|ing)|remov(ed?|ing)|access\s+revok(ed)?|unlink(ed)?)\b/i,
   Verification: /\b(verif(ied|ication)?|card\s+check(ed)?)\b/i,
-  "Payment Issues": /\b(payment|card|billing|charge|invoice|debt|balance)\b/i,
+  // "withdraw/withdrawal/refund" must be here — refund_request maps to Payment Issues and
+  // employees typically say "withdrawal" when answering those questions.
+  "Payment Issues": /\b(payment|card|billing|charge|invoice|debt|balance|withdraw|withdrawal|refund)\b/i,
   "Account Issues": /\b(account|disabled|enabled|restor(ed)?|banned|blocked)\b/i,
-  General: /\b(available|availability|stock|report|spend|site|error|issue|working|check)\b/i
+  // General is intentionally broad — site issues, availability questions, reports, etc. use
+  // varied language, so we capture common signal words rather than trying to be exhaustive.
+  General: /\b(available|availability|stock|report|spend|site|error|issue|working|check|access|load|open|fixed|resolved|ready|done)\b/i
 };
 
 // Returns true when any part of the employee's text is relevant to this client's tickets.
@@ -296,20 +300,43 @@ export async function POST(request: Request) {
       type ForwardTarget = { chatId: string; text: string };
       const targets: ForwardTarget[] = [];
 
+      const employeeLower = employeeText.toLowerCase();
+
       if (byClient.size === 1) {
         // Only one client — send the full employee message.
         const clientChatId = [...byClient.keys()][0]!;
         targets.push({ chatId: clientChatId, text: employeeText });
       } else {
-        // Multiple clients — extract relevant portions per client.
+        // Multiple clients — two-pass routing so no client gets missed.
+        //
+        // Pass 1: sentence-level extraction — each client gets only the sentences whose
+        //   keywords match their ticket category. This keeps answers clean and targeted.
+        //
+        // Pass 2: for any client that pass 1 missed, run the broader full-message relevance
+        //   check. If that matches (e.g. General catch-all: message > 15 chars), send the
+        //   FULL employee message to that client. This handles cases where the employee's
+        //   wording doesn't perfectly match the narrow sentence-level keyword patterns.
+        const unmatchedClients: Array<[string, Array<{ id: string; intent: string | null; chatTitle: string | null }>]> = [];
+
         for (const [clientChatId, clientTickets] of byClient.entries()) {
           const relevantText = extractRelevantAnswer(employeeText, clientTickets);
           if (relevantText) {
             targets.push({ chatId: clientChatId, text: relevantText });
             console.log("mark-reply-extracted-for-client", { clientChatId, originalLen: employeeText.length, extractedLen: relevantText.length });
+          } else {
+            unmatchedClients.push([clientChatId, clientTickets]);
           }
         }
-        // Fallback: if extraction matched no sentences for any client, forward full message to all.
+
+        // Pass 2: broader relevance check for clients that sentence extraction didn't cover.
+        for (const [clientChatId, clientTickets] of unmatchedClients) {
+          if (isRelevantForClient(employeeLower, clientTickets)) {
+            targets.push({ chatId: clientChatId, text: employeeText });
+            console.log("mark-reply-fullmsg-fallback-for-client", { clientChatId });
+          }
+        }
+
+        // Final fallback: if neither pass matched anyone, forward full message to all clients.
         if (targets.length === 0) {
           console.log("mark-reply-extraction-fallback-all-clients", { clientCount: byClient.size });
           for (const clientChatId of byClient.keys()) {
