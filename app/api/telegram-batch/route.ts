@@ -40,11 +40,12 @@ type QueuedMessage = {
 };
 
 // A photo (or image document) that should be forwarded to Mark after the text summary.
-// Carries the client group name and category so employees immediately know WHO sent it and WHAT it's about.
+// Carries the request category and a short description so employees can match the photo
+// to the right bullet in the batch summary — without revealing any client name.
 type PhotoForward = {
   fileId: string;
-  chatTitle: string;   // e.g. "BluePeak" — which client group sent the photo
-  category: string;    // e.g. "Deposits", "General", "Account Issues" — what the request is about
+  category: string;        // e.g. "Deposits", "General", "Account Issues"
+  requestSummary: string;  // e.g. "sent 30K" or "site is down" — from the client's own message
 };
 
 type BatchTicket = {
@@ -882,16 +883,22 @@ async function createTicketsFromQueuedMessages(
     // summary — each photo gets a caption showing the client group name and the category of
     // their request so employees immediately know whose screenshot it is and what it's about.
     const chatHasDeposit = messageGroups.some((g) => g.category === "Deposits");
-    const chatTitle = sortedUnprocessed.length > 0 ? getChatTitle(sortedUnprocessed[0]!) : String(chatId);
     for (const message of sortedUnprocessed) {
       const photoFileId = getPhotoFileId(message);
       if (photoFileId) {
-        // Try to match this photo message to its classified group to get the exact category.
-        // Caption-less photo messages won't appear in perMessageItems, so fall back to the
-        // chat-level deposit flag or General.
+        // Find which classified group this photo message belongs to so we can pull
+        // the request text and category. Caption-less photo messages won't appear in
+        // perMessageItems, so fall back to the group that contains this message (if any),
+        // then to chat-level deposit flag or General.
         const matchedItem = perMessageItems.find((item) => item.message.id === message.id);
-        const photoCategory = matchedItem?.category ?? (chatHasDeposit ? "Deposits" : "General");
-        chatPhotoForwards.push({ fileId: photoFileId, chatTitle, category: photoCategory });
+        const matchedGroup = messageGroups.find((g) => g.messages.some((m) => m.id === message.id));
+        const photoCategory = matchedItem?.category ?? matchedGroup?.category ?? (chatHasDeposit ? "Deposits" : "General");
+        // Build a short request description from the client's own words (no client name).
+        // Use the matched item's text first, then the first text in the group, then empty.
+        const rawSummary = matchedItem?.text ?? matchedGroup?.texts[0] ?? "";
+        // Trim to 80 chars so the caption stays readable on mobile.
+        const requestSummary = rawSummary.length > 80 ? rawSummary.slice(0, 77) + "…" : rawSummary;
+        chatPhotoForwards.push({ fileId: photoFileId, category: photoCategory, requestSummary });
       }
     }
 
@@ -1135,17 +1142,20 @@ async function handleBatch(request: Request) {
   });
 
   // Forward all client photos to Mark as follow-up messages after the text summary.
-  // Each photo gets a two-line caption: the client group name on line 1 so employees know
-  // exactly WHO sent it, and the request category on line 2 so they know WHAT it's about.
-  // Example: "📸 BluePeak\nDeposit screenshot" or "📸 NovaAds\nAccount Issues screenshot"
+  // Caption format: "📸 Deposit screenshot — sent 30K"
+  //                 "📸 General screenshot — site is down"
+  // No client name — employees match the photo to the right bullet in the summary above
+  // by reading the request description in the caption.
   for (const photo of photoForwards) {
     try {
       const categoryLabel = photo.category === "Deposits"
         ? "Deposit screenshot"
         : `${photo.category} screenshot`;
-      const caption = `📸 ${photo.chatTitle}\n${categoryLabel}`;
+      const caption = photo.requestSummary
+        ? `📸 ${categoryLabel} — ${photo.requestSummary}`
+        : `📸 ${categoryLabel}`;
       await maybeSendTelegramPhoto({ chatId: markGroupChatId, fileId: photo.fileId, caption, source: "telegram_batch" });
-      console.log("photo-forwarded-to-mark", { chatTitle: photo.chatTitle, category: photo.category });
+      console.log("photo-forwarded-to-mark", { category: photo.category, hasSummary: Boolean(photo.requestSummary) });
     } catch (err) {
       console.error("photo-forward-failed", { error: err instanceof Error ? err.message : "unknown" });
     }
