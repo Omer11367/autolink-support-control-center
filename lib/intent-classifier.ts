@@ -169,6 +169,8 @@ const RULES: IntentRule[] = [
       "balance issue",
       "payment issue",
       "payment failed",
+      "payment error",
+      "error payment",
       "cannot pay",
       "can't pay",
       "credit card problem",
@@ -180,7 +182,17 @@ const RULES: IntentRule[] = [
       "card rejected",
       "payment declined",
       "cannot launch campaigns",
-      "campaigns blocked"
+      "campaigns blocked",
+      "asks to confirm the payment",
+      "confirm the payment",
+      "need to confirm payment",
+      "did u change cards",
+      "change cards",
+      "changed the card",
+      "pay with old card",
+      "pay with the old card",
+      "did you change the card",
+      "card changed"
     ],
     completionOptions: ["Done", "Handled"]
   },

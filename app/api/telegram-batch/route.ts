@@ -380,6 +380,9 @@ function cleanTaskText(ticket: BatchTicket): string {
   }
 
   // General — label known sub-intents clearly so Mark sees them in the summary
+  if (category === "General" && ticket.intent === "site_issue") {
+    return "site is down / client cannot load the site";
+  }
   if (category === "General" && ticket.intent === "remaining_balance") {
     return "remaining balance inquiry";
   }
@@ -782,11 +785,12 @@ async function markChatBatchProcessed(
 }
 
 type ChatError = { chatId: string; error: string };
+type DepositLinkUpdate = { chatTitle: string; url: string; ticketId: string };
 
 async function createTicketsFromQueuedMessages(
   supabase: SupabaseAdminClient,
   messages: QueuedMessage[]
-): Promise<{ tickets: BatchTicket[]; photoForwards: PhotoForward[]; chatErrors: ChatError[]; chatDuplicateIntents: Map<string, string[]> }> {
+): Promise<{ tickets: BatchTicket[]; photoForwards: PhotoForward[]; depositLinkUpdates: DepositLinkUpdate[]; chatErrors: ChatError[]; chatDuplicateIntents: Map<string, string[]> }> {
   const messagesByChat = new Map<string, QueuedMessage[]>();
   for (const message of messages) {
     if (!message.telegram_chat_id) continue;
@@ -796,6 +800,7 @@ async function createTicketsFromQueuedMessages(
 
   const createdTickets: BatchTicket[] = [];
   const allPhotoForwards: PhotoForward[] = [];
+  const allDepositLinkUpdates: DepositLinkUpdate[] = [];
   const chatErrors: ChatError[] = [];
   const chatDuplicateIntents = new Map<string, string[]>();
   for (const [chatId, chatMessages] of messagesByChat.entries()) {
@@ -916,6 +921,7 @@ async function createTicketsFromQueuedMessages(
     type MessageGroup = { texts: string[]; messages: QueuedMessage[]; category: typeof CATEGORY_ORDER[number]; intent: string };
     const messageGroups: MessageGroup[] = [];
     const chatPhotoForwards: PhotoForward[] = [];
+    const chatDepositLinkUpdates: DepositLinkUpdate[] = [];
 
     for (const item of perMessageItems) {
       const lastGroup = messageGroups[messageGroups.length - 1];
@@ -1034,6 +1040,43 @@ async function createTicketsFromQueuedMessages(
       if (!latestGroupMessage) continue;
       const messageTime = getTelegramMessageDate(latestGroupMessage);
 
+      // ── Split-deposit link detection ─────────────────────────────────────────────────────────
+      // Client sometimes sends "sent 30K" in one message, then the Etherscan/blockchain URL in
+      // a separate message (next batch). When the URL arrives, the original deposit ticket is
+      // already stamped with internal_message_id (sent to Mark), so it's excluded from
+      // pendingTickets. Mark never sees the link. Fix: detect URL-only deposit messages and
+      // send Mark a targeted follow-up instead of creating a redundant second ticket.
+      if (classification.intent === "deposit_funds") {
+        const isUrlOnly = /^\s*https?:\/\/\S+\s*$/.test(groupedText);
+        if (isUrlOnly) {
+          const oneDayAgo = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
+          const { data: sentDepositData } = await supabase
+            .from("tickets")
+            .select("id, internal_message_id")
+            .eq("client_chat_id", chatId)
+            .eq("intent", "deposit_funds")
+            .not("internal_message_id", "is", null)
+            .gte("created_at", oneDayAgo)
+            .order("created_at", { ascending: false })
+            .limit(1)
+            .maybeSingle();
+          const sentDeposit = sentDepositData as { id: string; internal_message_id: string | number | null } | null;
+          if (sentDeposit?.id) {
+            // Original deposit was already sent to Mark — queue a follow-up link notification.
+            chatDepositLinkUpdates.push({
+              chatTitle: getChatTitle(latestGroupMessage) ?? chatId,
+              url: groupedText.trim(),
+              ticketId: sentDeposit.id
+            });
+            ticketsCreatedForChat++; // count as handled — client will get ack reply
+            chatDuplicateIntents.set(chatId, [...(chatDuplicateIntents.get(chatId) ?? []), "deposit_funds"]);
+            console.log("deposit-link-update-queued", { chatId, ticketId: sentDeposit.id });
+            continue; // skip creating a redundant second ticket
+          }
+        }
+      }
+      // ────────────────────────────────────────────────────────────────────────────────────────
+
       const { data: createdTicketData, error: createTicketError } = await supabase
         .from("tickets")
         .insert({
@@ -1100,6 +1143,7 @@ async function createTicketsFromQueuedMessages(
     // so we don't spam Mark with photos from non-support messages).
     if (ticketsCreatedForChat > 0) {
       allPhotoForwards.push(...chatPhotoForwards);
+      allDepositLinkUpdates.push(...chatDepositLinkUpdates);
     }
     } catch (chatError) {
       // Per-chat isolation: one failing chat must not block other chats from being processed.
@@ -1116,7 +1160,7 @@ async function createTicketsFromQueuedMessages(
     }
   }
 
-  return { tickets: createdTickets, photoForwards: allPhotoForwards, chatErrors, chatDuplicateIntents };
+  return { tickets: createdTickets, photoForwards: allPhotoForwards, depositLinkUpdates: allDepositLinkUpdates, chatErrors, chatDuplicateIntents };
 }
 
 async function handleBatch(request: Request) {
@@ -1151,7 +1195,7 @@ async function handleBatch(request: Request) {
     .limit(500);
   if (queuedMessagesError) throw new Error(`Supabase queued messages query failed: ${queuedMessagesError.message}`);
 
-  const { tickets: createdTickets, photoForwards, chatErrors, chatDuplicateIntents } = await createTicketsFromQueuedMessages(supabase, (queuedMessagesData ?? []) as unknown as QueuedMessage[]);
+  const { tickets: createdTickets, photoForwards, depositLinkUpdates, chatErrors, chatDuplicateIntents } = await createTicketsFromQueuedMessages(supabase, (queuedMessagesData ?? []) as unknown as QueuedMessage[]);
   if (chatErrors.length > 0) {
     console.error("batch-had-chat-errors", { count: chatErrors.length, errors: chatErrors });
   }
@@ -1174,9 +1218,22 @@ async function handleBatch(request: Request) {
     ...pendingTickets.filter((ticket) => !seenTicketIds.has(ticket.id))
   ];
   console.log("mark-batch-found-requests", { count: tickets.length });
-  if (tickets.length === 0) {
+  if (tickets.length === 0 && depositLinkUpdates.length === 0) {
     console.log("mark-batch-no-requests");
     return NextResponse.json({ ok: true, count: 0 });
+  }
+  if (tickets.length === 0) {
+    // No new summary to send, but deposit link follow-ups still need to go out.
+    for (const update of depositLinkUpdates) {
+      try {
+        const updateText = `🔗 Deposit link received — ${escapeTelegramHtml(update.chatTitle)}\n${update.url}`;
+        await maybeSendTelegramMessage({ chatId: markGroupChatId, text: updateText, source: "telegram_batch" });
+        console.log("deposit-link-update-sent-to-mark", { ticketId: update.ticketId });
+      } catch (err) {
+        console.error("deposit-link-update-failed", { error: err instanceof Error ? err.message : "unknown" });
+      }
+    }
+    return NextResponse.json({ ok: true, count: 0, depositLinkUpdatesSent: depositLinkUpdates.length });
   }
 
   console.log("mark-batch-ready", { count: tickets.length });
@@ -1216,6 +1273,20 @@ async function handleBatch(request: Request) {
       console.log("photo-forwarded-to-mark", { category: photo.category, hasSummary: Boolean(photo.requestSummary) });
     } catch (err) {
       console.error("photo-forward-failed", { error: err instanceof Error ? err.message : "unknown" });
+    }
+  }
+
+  // Send deposit link follow-ups to Mark — these are blockchain URLs that arrived in a
+  // separate batch after the original "sent X amount" was already forwarded to Mark.
+  // Sending them as standalone messages keeps the deposit trail complete without creating
+  // a confusing duplicate deposit entry in the main summary.
+  for (const update of depositLinkUpdates) {
+    try {
+      const updateText = `🔗 Deposit link received — ${escapeTelegramHtml(update.chatTitle)}\n${update.url}`;
+      await maybeSendTelegramMessage({ chatId: markGroupChatId, text: updateText, source: "telegram_batch" });
+      console.log("deposit-link-update-sent-to-mark", { ticketId: update.ticketId });
+    } catch (err) {
+      console.error("deposit-link-update-failed", { error: err instanceof Error ? err.message : "unknown" });
     }
   }
 
