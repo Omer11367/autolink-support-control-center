@@ -97,6 +97,7 @@ function intentToCategory(intent: string | null): string {
   if (["payment_issue", "refund_request"].includes(n)) return "Payment Issues";
   if (n === "verify_account") return "Verification";
   if (["check_account_status", "request_data_banned_accounts", "check_policy"].includes(n)) return "Account Issues";
+  if (n === "replacement_request") return "Replacement";
   return "General";
 }
 

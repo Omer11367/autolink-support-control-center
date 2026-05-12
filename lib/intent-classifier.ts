@@ -87,8 +87,28 @@ const RULES: IntentRule[] = [
   },
   {
     intent: "refund_request",
-    phrases: ["refund", "withdraw", "return money", "wallet address", "trc20", "remaining balance"],
+    phrases: ["refund", "withdraw", "return money", "wallet address", "trc20"],
     completionOptions: ["Handled"]
+  },
+  {
+    intent: "remaining_balance",
+    phrases: [
+      "remaining balance", "balance left", "how much balance", "what's our balance",
+      "whats our balance", "account balance", "how much credit", "credit left",
+      "credit remaining", "how much do we have left", "balance check", "check balance",
+      "check our balance", "balance inquiry", "what is our balance"
+    ],
+    completionOptions: ["Handled"]
+  },
+  {
+    intent: "replacement_request",
+    phrases: [
+      "replacement", "replacement account", "replace account", "replace our account",
+      "replace the account", "replace banned", "need replacement", "account replacement",
+      "get a replacement", "new account instead", "substitute account",
+      "can you replace", "replace it", "new one instead"
+    ],
+    completionOptions: ["Done", "Handled"]
   },
   {
     intent: "request_accounts",
@@ -108,7 +128,10 @@ const RULES: IntentRule[] = [
   },
   {
     intent: "check_account_status",
-    phrases: ["status", "check status", "account status", "active", "blocked", "disabled", "restricted", "banned", "usable", "can run ads", "account problem"],
+    phrases: ["status", "check status", "account status", "active", "blocked", "disabled", "restricted", "banned", "usable", "can run ads", "account problem",
+      "campaigns stopped", "campaigns paused", "campaigns not running", "campaigns not delivering",
+      "ads stopped", "ads paused", "ads not running", "ads not delivering", "ads not working",
+      "campaigns disabled", "stopped running", "not running anymore"],
     completionOptions: ["Handled"]
   },
   {

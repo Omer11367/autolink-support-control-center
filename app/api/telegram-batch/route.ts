@@ -84,7 +84,7 @@ type LinkedFollowUpContext = {
   extractedData: Record<string, unknown>;
 };
 
-const CATEGORY_ORDER = ["Share", "Unshare", "Deposits", "Payment Issues", "Verification", "Account Issues", "General"] as const;
+const CATEGORY_ORDER = ["Share", "Unshare", "Deposits", "Payment Issues", "Verification", "Account Issues", "Replacement", "General"] as const;
 // Cron fires every 5 min on wall-clock boundaries (:00, :05, :10, …). To make a message
 // sent at 1:03 visible to the 1:05 batch, the eligibility cutoff must be tight (1 min).
 // A message arriving exactly at 1:04 still passes the 1:05 cutoff (lte 1:04 includes equal).
@@ -187,7 +187,8 @@ function mapIntentToCategory(intent: string | null | undefined): typeof CATEGORY
   if (["payment_issue", "refund_request"].includes(normalized)) return "Payment Issues";
   if (["verify_account"].includes(normalized)) return "Verification";
   if (["check_account_status", "request_data_banned_accounts", "check_policy"].includes(normalized)) return "Account Issues";
-  // site_issue, check_availability, get_spend_report, request_accounts, general_support → General
+  if (["replacement_request"].includes(normalized)) return "Replacement";
+  // site_issue, check_availability, get_spend_report, request_accounts, remaining_balance, general_support → General
   return "General";
 }
 
@@ -343,8 +344,21 @@ function cleanTaskText(ticket: BatchTicket): string {
 
   if (category === "Account Issues") {
     const account = firstAccount(accountStatusAction) ?? extractEntityAfter(original, ["account", "accounts", "acc", "ad account", "ad accounts"]);
+    if (/\b(campaigns?\s+stopped|campaigns?\s+paused|ads?\s+stopped|ads?\s+paused|not\s+running|not\s+delivering)\b/i.test(original)) {
+      return account ? `campaigns stopped on account ${account}` : "campaigns stopped / not running";
+    }
     if (account && /\b(disabled|restricted|blocked)\b/i.test(original)) return `account ${account} disabled`;
     return account ? `account issue on account ${account}` : "account issue reported";
+  }
+
+  if (category === "Replacement") {
+    const account = firstAccount(accountStatusAction) ?? extractEntityAfter(original, ["account", "accounts", "acc", "ad account", "ad accounts"]);
+    return account ? `replacement account request for ${account}` : "replacement account request";
+  }
+
+  // General — label known sub-intents clearly so Mark sees them in the summary
+  if (category === "General" && ticket.intent === "remaining_balance") {
+    return "remaining balance inquiry";
   }
 
   // Return the full original message (line-breaks preserved) so multi-question groups
@@ -424,6 +438,7 @@ function buildMarkSummary(tickets: BatchTicket[]): string {
     "Payment Issues": "PAYMENT ISSUES",
     Verification: "VERIFICATION",
     "Account Issues": "ACCOUNT ISSUES",
+    Replacement: "REPLACEMENT REQUESTS",
     General: "GENERAL QUESTIONS"
   };
 
@@ -467,6 +482,7 @@ function chooseClientReply(tickets: BatchTicket[]): string {
   if (categories.includes("Unshare")) return "Sure, we'll process the unshare request and update you.";
   if (categories.includes("Verification")) return "Got it, we'll check the verification and update you.";
   if (categories.includes("Account Issues")) return "Got it, we'll look into the account issue and update you.";
+  if (categories.includes("Replacement")) return "Got it, we'll check on a replacement account and get back to you.";
 
   // General category — when there are multiple DIFFERENT intents the client asked about several
   // separate topics in one batch. Picking one intent-specific reply silently ignores the rest.
