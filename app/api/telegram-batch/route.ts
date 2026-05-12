@@ -135,13 +135,16 @@ function normalizeComparableText(text: string): string {
 
 function isPureNonSupportChatter(text: string): boolean {
   const normalized = normalizeComparableText(text);
-  const reactionOnly = /^[\s\u{1F44D}\u2764\uFE0F\u2705\u{1F64F}]+$/u.test(text.trim());
+  const trimmed = text.trim();
+  const reactionOnly = /^[\s\u{1F44D}\u2764\uFE0F\u2705\u{1F64F}]+$/u.test(trimmed);
   const chatter = ["hi", "hello", "hey", "yo", "good morning", "good evening", "good night", "thanks", "thank you", "thx", "ty", "ok", "okay", "alright", "received", "noted"];
+  // Multi-word greetings: "hey guys", "hi team", "hello everyone", "hi all", etc.
+  const isMultiWordGreeting = /^(hey|hi|hello|yo|sup|heya|hiya)\s+(guys|team|all|everyone|y'?all|there|guys|fellas|folks)\.?!?$/i.test(trimmed);
   // Social greetings that are clearly not support requests: "how are you guys?", "how r u", "how's it going" etc.
-  const isSocialGreeting = /^how (are|r) (you|u|ya|yall|y'?all|you\s+guys|you\s+all|you\s+doing|everybody|everyone)/i.test(text.trim())
-    || /^how'?s (it going|everything|things|life|business)/i.test(text.trim())
-    || /^(what'?s up|wyd|wassup|sup guys)/i.test(text.trim());
-  return reactionOnly || chatter.includes(normalized) || isSocialGreeting;
+  const isSocialGreeting = /^how (are|r) (you|u|ya|yall|y'?all|you\s+guys|you\s+all|you\s+doing|everybody|everyone)/i.test(trimmed)
+    || /^how'?s (it going|everything|things|life|business)/i.test(trimmed)
+    || /^(what'?s up|wyd|wassup|sup guys)/i.test(trimmed);
+  return reactionOnly || chatter.includes(normalized) || isSocialGreeting || isMultiWordGreeting;
 }
 
 function isGreetingText(text: string): boolean {
@@ -149,6 +152,8 @@ function isGreetingText(text: string): boolean {
   if (["hi", "hello", "hey", "yo", "good morning", "good evening", "good night"].includes(normalized)) return true;
   // Social greetings: "how are you", "how are you guys", "what's up", etc.
   const trimmed = text.trim();
+  // Multi-word greetings: "hey guys", "hi team", "hello everyone"
+  if (/^(hey|hi|hello|yo|sup|heya|hiya)\s+(guys|team|all|everyone|y'?all|there|fellas|folks)\.?!?$/i.test(trimmed)) return true;
   if (/^how (are|r) (you|u|ya|yall|y'?all|you\s+guys|you\s+all|you\s+doing|everybody|everyone)/i.test(trimmed)) return true;
   if (/^how'?s (it going|everything|things|life|business)/i.test(trimmed)) return true;
   if (/^(what'?s up|wyd|wassup|sup guys)/i.test(trimmed)) return true;
@@ -845,8 +850,15 @@ async function createTicketsFromQueuedMessages(
       if (!text || isPureNonSupportChatter(text)) continue;
 
       const singleClassification = classifyIntent(text);
-      const category = mapIntentToCategory(singleClassification.intent);
-      perMessageItems.push({ message, text, category, intent: singleClassification.intent });
+      // Photo messages with a short payment-related caption ("please check", "sent", etc.)
+      // are complete deposit requests — the photo IS the proof. Without this override the
+      // classifier returns general_support and the message gets held as a fragment, so the
+      // photo never reaches Mark and the client never gets a reply.
+      const isPhotoMessage = message.message_type === "client_photo";
+      const isPaymentCaption = /^(please\s*check|pls\s*check|check\s*please|check|sent|paid|deposit|please|pls|done)\.?!?$/i.test(text.trim());
+      const effectiveIntent = (isPhotoMessage && isPaymentCaption) ? "deposit_funds" : singleClassification.intent;
+      const category = mapIntentToCategory(effectiveIntent);
+      perMessageItems.push({ message, text, category, intent: effectiveIntent });
     }
 
     // ── Step 2: handle all-chatter case (greetings, non-support) ───────────────────────────────
@@ -930,7 +942,10 @@ async function createTicketsFromQueuedMessages(
         console.log("unclear-batch-forwarded-as-general", { chatId, category: group.category });
       }
 
-      if (isIncompleteRequestFragment(groupedText)) {
+      // Skip fragment check when the group includes a photo — the photo is the substance,
+      // so a short caption like "please check" or "sent" is NOT incomplete in this context.
+      const groupHasPhoto = group.messages.some((m) => getPhotoFileId(m) !== null);
+      if (isIncompleteRequestFragment(groupedText) && !groupHasPhoto) {
         console.log("support-fragment-held-for-next-batch", { chatId, groupedText });
         continue;
       }
