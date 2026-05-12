@@ -35,7 +35,7 @@ type IntentRule = {
 const RULES: IntentRule[] = [
   {
     intent: "share_ad_account",
-    phrases: ["share", "share account", "share accounts", "add", "connect", "give access", "grant access", "attach", "link", "add acc to bm", "add to bm", "add accs to bm", "add accounts to bm", "put in bm", "put on bm"],
+    phrases: ["share", "share account", "share accounts", "add", "connect", "give access", "grant access", "attach", "link", "add acc to bm", "add to bm", "add accs to bm", "add accounts to bm", "put in bm", "put on bm", "add to both bms", "both bms", "share to both", "add to both", "same accounts to both", "add same accs"],
     completionOptions: ["Done", "Already shared", "Only view access"]
   },
   {
