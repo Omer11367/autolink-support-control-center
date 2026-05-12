@@ -78,6 +78,7 @@ const RULES: IntentRule[] = [
       "etherscan",
       "polygonscan",
       "bscscan",
+      "tronscan",
       "check deposit",
       "please confirm deposit",
       "please check payment",
@@ -126,7 +127,12 @@ const RULES: IntentRule[] = [
   },
   {
     intent: "check_availability",
-    phrases: ["available", "availability", "do you have", "do you have accounts", "accounts available", "stock", "can we request"],
+    phrases: [
+      "available", "availability", "do you have", "do you have accounts", "accounts available", "stock", "can we request",
+      "how many accounts can we apply", "how many can we apply", "how many accounts per day", "daily limit",
+      "how many can we request per day", "how many per day", "is there a daily limit", "is there a limit",
+      "limit per day", "what start limit", "start limit", "start limit on accounts", "what is the start limit"
+    ],
     completionOptions: ["Not available", "Handled"]
   },
   {
@@ -210,7 +216,9 @@ const RULES: IntentRule[] = [
       "please process", "could you process", "process account",
       "submitted request for", "submitted requests", "submitted some more",
       "submitted for ad accounts", "i just submitted", "i've submitted",
-      "we requested", "i requested accounts", "requested more accounts"
+      "we requested", "i requested accounts", "requested more accounts",
+      "i have already applied", "i already applied", "already applied", "have already applied",
+      "already applied please check", "already applied, please check"
     ],
     completionOptions: ["Done", "Handled"]
   },
@@ -637,7 +645,7 @@ function hasDepositPriority(text: string): boolean {
   // "send" (present tense) is intentionally included: "guys send 25k" is a deposit notification.
   // "funding", "add balance", "add to wallet" are how clients announce they're sending money.
   const hasDepositWords = /\b(send|sent|deposit|deposited|paid|funds?\s+sent|transfer(?:red)?|top\s*up|money\s+sent|check\s+deposit|funding|add\s+balance|add\s+to\s+wallet|add\s+payment\s+to\s+wallet|balance\s+to\s+(our\s+)?wallet)\b/i.test(text);
-  const hasAmount = /(?:\$|usd\s*)?\d+(?:[,.]\d+)?\s*(?:k|K)?\s*(?:usdt|usd|dollars?|\$)?/i.test(text);
+  const hasAmount = /(?:\$|usd\s*)?\d+(?:[,.]\d+)?\s*(?:[kкК])?\s*(?:usdt|usd|dollars?|\$)?/i.test(text);
   const asksToCheck = /\b(check|confirm|please\s+check|check\s+please)\b/i.test(text);
 
   return hasTransferProof || (hasDepositWords && (hasAmount || asksToCheck));
@@ -666,7 +674,7 @@ function hasPaymentContextNear(text: string, start: number, end: number): boolea
 function extractAmount(text: string): string | null {
   if (!hasPaymentContext(text)) return null;
 
-  const matches = text.matchAll(/(?:\$|usd\s*)?\d+(?:[,.]\d+)?\s*(?:k|K)?\s*(?:usdt|usd|dollars?|\$)?/gi);
+  const matches = text.matchAll(/(?:\$|usd\s*)?\d+(?:[,.]\d+)?\s*(?:[kкК])?\s*(?:usdt|usd|dollars?|\$)?/gi);
 
   for (const match of matches) {
     const value = match[0]?.trim();

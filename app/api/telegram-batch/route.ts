@@ -169,7 +169,7 @@ function isIncompleteRequestFragment(text: string): boolean {
   const normalized = normalizeComparableText(text);
   if (!normalized) return true;
   if (/^(?:sent|send|paid|deposit|check|please check|pls check|\$|usd|usdt|dollars?)$/i.test(normalized)) return true;
-  if (/^(?:\d+(?:[.,]\d+)?k?|\d+(?:[.,]\d+)?\s*(?:usd|usdt|\$|dollars?))$/i.test(normalized)) return true;
+  if (/^(?:\d+(?:[.,]\d+)?[kкК]?|\d+(?:[.,]\d+)?\s*(?:usd|usdt|\$|dollars?))$/i.test(normalized)) return true;
   if (/^(?:bm|business manager)\s+[A-Za-z0-9_-]+$/i.test(normalized)) return true;
   if (/^(?:account|acc|ad account)\s+[A-Za-z0-9_-]+$/i.test(normalized)) return true;
   return false;
@@ -246,7 +246,7 @@ function actionToCategory(action: SheetAction): typeof CATEGORY_ORDER[number] {
 }
 
 function extractAmount(text: string): string | null {
-  const match = text.match(/(?:\$|usd\s*)?\d+(?:[,.]\d+)?\s*(?:k|K)?\s*(?:usdt|usd|dollars?|\$)?/i);
+  const match = text.match(/(?:\$|usd\s*)?\d+(?:[,.]\d+)?\s*(?:[kкК])?\s*(?:usdt|usd|dollars?|\$)?/i);
   return match?.[0] ? compactText(match[0]).replace(/\s+/g, "") : null;
 }
 
