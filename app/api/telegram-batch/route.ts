@@ -894,12 +894,18 @@ async function createTicketsFromQueuedMessages(
       // classifier returns general_support and the message gets held as a fragment, so the
       // photo never reaches Mark and the client never gets a reply.
       const isPhotoMessage = message.message_type === "client_photo";
+      // "isPaymentCaption" — short caption that appears ON a photo message (the photo IS the proof).
       const isPaymentCaption = /^(please\s*check|pls\s*check|check\s*please|check|sent|paid|deposit|please|pls|done)\.?!?$/i.test(text.trim());
+      // "isClearDepositCaption" — only unambiguous deposit signals like "sent", "paid", "deposit".
+      // "check" / "please check" alone are NOT clear deposit signals — a client could send
+      // an account screenshot and write "please check" beneath it. Without image AI we can't
+      // tell what the photo contains, so we classify on the text alone and let Mark look at the photo.
+      const isClearDepositCaption = /^(sent|paid|deposit|payment\s*proof|proof|transferred|transfer|done)\.?!?$/i.test(text.trim());
       // Override to deposit_funds when:
-      // (a) the caption is ON the photo itself, OR
-      // (b) the text is a payment caption AND this chat's batch already contains a photo
-      //     (client sent photo + "please check" as two separate messages).
-      const effectiveIntent = ((isPhotoMessage && isPaymentCaption) || (chatBatchHasPhoto && isPaymentCaption))
+      // (a) the caption is ON the photo itself (isPhotoMessage + any payment word), OR
+      // (b) the text is an UNAMBIGUOUS deposit signal AND this chat's batch already contains a photo.
+      //     "please check" alone is too ambiguous — it goes to normal classification instead.
+      const effectiveIntent = ((isPhotoMessage && isPaymentCaption) || (chatBatchHasPhoto && isClearDepositCaption))
         ? "deposit_funds"
         : singleClassification.intent;
       const category = mapIntentToCategory(effectiveIntent);
@@ -967,6 +973,12 @@ async function createTicketsFromQueuedMessages(
         const matchedItem = perMessageItems.find((item) => item.message.id === message.id);
         const matchedGroup = messageGroups.find((g) => g.messages.some((m) => m.id === message.id));
         const photoCategory = matchedItem?.category ?? matchedGroup?.category ?? (chatHasDeposit ? "Deposits" : "General");
+        // Deposit photos are handled manually — the client gets an ack reply but Mark does NOT
+        // receive the photo or any ticket for it.
+        if (photoCategory === "Deposits") {
+          console.log("deposit-photo-skipped-no-forward", { chatId });
+          continue;
+        }
         // Build a short request description from the client's own words (no client name).
         // Use the matched item's text first, then the first text in the group, then empty.
         const rawSummary = matchedItem?.text ?? matchedGroup?.texts[0] ?? "";
@@ -991,11 +1003,16 @@ async function createTicketsFromQueuedMessages(
       // Skip fragment check when the group includes a photo — the photo is the substance,
       // so a short caption like "please check" or "sent" is NOT incomplete in this context.
       const groupHasPhoto = group.messages.some((m) => getPhotoFileId(m) !== null);
-      // Also skip fragment hold when the group intent is deposit_funds and this chat's batch
-      // has a photo — covers the case where the client sent the photo as a separate message
-      // (no caption) and typed "please check" in a follow-up text message.
-      const isDepositCaptionAlongsidePhoto = group.intent === "deposit_funds" && chatBatchHasPhoto;
-      if (isIncompleteRequestFragment(groupedText) && !groupHasPhoto && !isDepositCaptionAlongsidePhoto) {
+      // Also skip hold when a photo exists in this chat's batch AND the text is a short payment
+      // caption — client sent a photo (deposit proof, account screenshot, etc.) as a separate
+      // message and typed a brief caption. The photo provides the substance; we should not hold
+      // the text as a fragment. It will classify on its own text (General if ambiguous, Deposits
+      // if a clear deposit signal), create a ticket, and Mark will see the forwarded photo.
+      const groupHasPaymentCaption = group.texts.some((t) =>
+        /^(please\s*check|pls\s*check|check\s*please|check|sent|paid|deposit|please|pls|done)\.?!?$/i.test(t.trim())
+      );
+      const fragmentExemptDueToPhoto = chatBatchHasPhoto && groupHasPaymentCaption;
+      if (isIncompleteRequestFragment(groupedText) && !groupHasPhoto && !fragmentExemptDueToPhoto) {
         console.log("support-fragment-held-for-next-batch", { chatId, groupedText });
         continue;
       }
@@ -1032,6 +1049,17 @@ async function createTicketsFromQueuedMessages(
 
       if (!classification.requiresMark || classification.intent === "no_action") {
         console.log("non-request-group-skipped", { chatId, category: group.category, intent: classification.intent });
+        continue;
+      }
+
+      // Deposits are handled manually by the team.
+      // The bot acknowledges the client but does NOT create a ticket or notify Mark.
+      // This also prevents the employee's reply to a Mark batch from being accidentally
+      // forwarded to a deposit-only client group (since no shared internal_message_id is set).
+      if (classification.intent === "deposit_funds") {
+        ticketsCreatedForChat++;
+        chatDuplicateIntents.set(chatId, [...(chatDuplicateIntents.get(chatId) ?? []), "deposit_funds"]);
+        console.log("deposit-ack-no-mark-ticket", { chatId });
         continue;
       }
 
