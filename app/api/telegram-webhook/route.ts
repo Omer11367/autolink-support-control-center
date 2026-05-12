@@ -91,12 +91,15 @@ function isEmployeeHoldingAck(text: string): boolean {
 // but kept local here so the webhook has no dependency on the batch route module.
 function intentToCategory(intent: string | null): string {
   const n = String(intent ?? "").toLowerCase();
+  if (n === "process_account_creation") return "Account Creation";
   if (["share_ad_account", "transfer_ad_account"].includes(n)) return "Share";
   if (n === "unshare_ad_account") return "Unshare";
   if (n === "deposit_funds") return "Deposits";
   if (["payment_issue", "refund_request"].includes(n)) return "Payment Issues";
   if (n === "verify_account") return "Verification";
-  if (["check_account_status", "request_data_banned_accounts", "check_policy"].includes(n)) return "Account Issues";
+  if (["check_account_status", "request_data_banned_accounts", "check_policy",
+    "pause_campaigns", "appeal_review", "account_not_visible", "rename_account",
+    "request_account_ids"].includes(n)) return "Account Issues";
   if (n === "replacement_request") return "Replacement";
   return "General";
 }

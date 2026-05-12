@@ -35,7 +35,7 @@ type IntentRule = {
 const RULES: IntentRule[] = [
   {
     intent: "share_ad_account",
-    phrases: ["share", "share account", "share accounts", "add", "connect", "give access", "grant access", "attach", "link", "add acc to bm"],
+    phrases: ["share", "share account", "share accounts", "add", "connect", "give access", "grant access", "attach", "link", "add acc to bm", "add to bm", "add accs to bm", "add accounts to bm", "put in bm", "put on bm"],
     completionOptions: ["Done", "Already shared", "Only view access"]
   },
   {
@@ -45,7 +45,7 @@ const RULES: IntentRule[] = [
   },
   {
     intent: "transfer_ad_account",
-    phrases: ["transfer", "move accounts", "new bm", "switch bm", "replace bm"],
+    phrases: ["transfer", "move accounts", "new bm", "switch bm", "replace bm", "delete from bm", "change bm", "move to bm", "and delete from", "remove from old bm", "change business manager"],
     completionOptions: ["Done", "Handled"]
   },
   {
@@ -80,7 +80,16 @@ const RULES: IntentRule[] = [
       "bscscan",
       "check deposit",
       "please confirm deposit",
-      "please check payment"
+      "please check payment",
+      "add balance",
+      "add to wallet",
+      "add balance to wallet",
+      "add payment to wallet",
+      "wallet balance",
+      "funding",
+      "i'm funding",
+      "balance to our wallet",
+      "budget to our wallet"
     ],
     completionOptions: ["Funds arrived", "Handled"],
     note: "Never confirm funds automatically."
@@ -131,7 +140,10 @@ const RULES: IntentRule[] = [
     phrases: ["status", "check status", "account status", "active", "blocked", "disabled", "restricted", "banned", "usable", "can run ads", "account problem",
       "campaigns stopped", "campaigns paused", "campaigns not running", "campaigns not delivering",
       "ads stopped", "ads paused", "ads not running", "ads not delivering", "ads not working",
-      "campaigns disabled", "stopped running", "not running anymore"],
+      "campaigns disabled", "stopped running", "not running anymore",
+      "not spending", "doesn't spend", "do not spend", "no spend", "stopped spending",
+      "low usage", "not spending now", "haven't spent", "hasnt spent", "it doesn't spend",
+      "they do not spend", "it stopped spending"],
     completionOptions: ["Handled"]
   },
   {
@@ -176,11 +188,80 @@ const RULES: IntentRule[] = [
     intent: "request_data_banned_accounts",
     phrases: ["need data", "account id", "campaign name", "expenses", "banned accounts", "report from banned", "down accounts"],
     completionOptions: ["Handled"]
+  },
+  {
+    // Client has already submitted via dashboard/spreadsheet and is asking staff to action it.
+    // Distinct from request_accounts ("I need new accounts") — this is "I already submitted, please process".
+    intent: "process_account_creation",
+    phrases: [
+      "process account creation", "process creation", "process new accs", "process new accounts",
+      "please process", "could you process", "process account",
+      "submitted request for", "submitted requests", "submitted some more",
+      "submitted for ad accounts", "i just submitted", "i've submitted",
+      "we requested", "i requested accounts", "requested more accounts"
+    ],
+    completionOptions: ["Done", "Handled"]
+  },
+  {
+    // Client asking for the ad account IDs — very common follow-up after delivery.
+    intent: "request_account_ids",
+    phrases: [
+      "add ids", "add id", "add the ids", "send ids", "send the ids",
+      "account ids please", "need account ids", "i need ids",
+      "provide ids", "provide the ids", "ids of ad accounts",
+      "ids of accounts", "please add id", "can you add id",
+      "please send ids", "send us the ids"
+    ],
+    completionOptions: ["Handled"]
+  },
+  {
+    intent: "rename_account",
+    phrases: [
+      "rename", "rename acc", "rename account", "change name", "change naming",
+      "change the name of", "account name change", "rename ad account",
+      "change account name", "new name for"
+    ],
+    completionOptions: ["Done", "Handled"]
+  },
+  {
+    intent: "pause_campaigns",
+    phrases: [
+      "pause campaigns", "pause ads", "pause ad accounts", "pause accounts",
+      "stop campaigns", "stop advertising", "stop ads", "pause advertising",
+      "turn off campaigns", "turn off ads", "stop running ads",
+      "pause the campaigns", "pause the ads", "pause ad"
+    ],
+    completionOptions: ["Done", "Handled"]
+  },
+  {
+    intent: "appeal_review",
+    phrases: [
+      "appeal", "request review", "request a review", "submit review",
+      "review these accounts", "appeal acc", "appeal account",
+      "accounts have been taken down", "taken down", "request for review",
+      "meta review", "need a review", "review please", "please appeal",
+      "asking for review", "ask for review"
+    ],
+    completionOptions: ["Handled"]
+  },
+  {
+    // Account was shared but client can't see it in their BM or dashboard.
+    intent: "account_not_visible",
+    phrases: [
+      "don't see acc", "dont see acc", "don't see this acc", "dont see this acc",
+      "not in bm", "not showing in bm", "not visible in bm",
+      "not appearing in bm", "account not found", "doesn't appear on dashboard",
+      "not found on dashboard", "not showing on dashboard",
+      "not found in bm", "cant find the account", "can't find the account",
+      "account is missing", "missing from bm", "not showing up",
+      "doesn't appear", "not showing up in bm"
+    ],
+    completionOptions: ["Handled"]
   }
 ];
 
 const REACTION_ONLY = /^[\s\u{1F44D}\u2764\uFE0F\u2705\u{1F64F}]+$/u;
-const SIMPLE_ACK_ONLY = /^(?:ok|okay|thanks|thank you|ty|yes|no|wait|one sec|one second|sec|noted|got it|received|sure|alright|all good)[.!\s]*$/i;
+const SIMPLE_ACK_ONLY = /^(?:ok|okay|thanks|thank you|ty|yes|no|wait|one sec|one second|sec|noted|got it|received|sure|alright|all good|greetings|greetings everyone|nice to meet you|nice to e-meet you|bueno)[.!\s]*$/i;
 
 const SAFE_HOLDING_RESPONSES = [
   "Got it, checking this now.",
@@ -530,7 +611,7 @@ function extractAccessLevel(text: string): AccessLevel {
 }
 
 function hasPaymentContext(text: string): boolean {
-  return /\b(payment|deposit|deposited|sent|paid|funds?|usdt|usd|dollars?|top\s*up|transferred|transfer|transaction\s+hash|tx\s+hash|etherscan|payment\s+proof|proof\s+of\s+payment)\b|\$/i.test(text);
+  return /\b(payment|deposit|deposited|sent|paid|funds?|usdt|usd|dollars?|top\s*up|transferred|transfer|transaction\s+hash|tx\s+hash|etherscan|payment\s+proof|proof\s+of\s+payment|funding|add\s+balance|wallet\s+balance|add\s+to\s+wallet)\b|\$/i.test(text);
 }
 
 function hasPaymentIssuePriority(text: string): boolean {
@@ -540,9 +621,10 @@ function hasPaymentIssuePriority(text: string): boolean {
 function hasDepositPriority(text: string): boolean {
   if (hasPaymentIssuePriority(text)) return false;
 
-  const hasTransferProof = /\b(payment\s+proof|proof\s+of\s+payment|transaction\s+hash|tx\s+hash|etherscan|polygonscan|bscscan|tronscan|usdt|trc20|erc20|hash)\b|https?:\/\/\S*(?:etherscan|polygonscan|bscscan|tronscan|blockchain)\S*/i.test(text);
+  const hasTransferProof = /\b(payment\s+proof|proof\s+of\s+payment|transaction\s+hash|tx\s+hash|etherscan|polygonscan|bscscan|tronscan|usdt|trc20|erc20|hash)\b|https?:\/\/\S*(?:etherscan|polygonscan|bscscan|tronscan|blockchain)\S*|\b0x[a-f0-9]{40,}\b/i.test(text);
   // "send" (present tense) is intentionally included: "guys send 25k" is a deposit notification.
-  const hasDepositWords = /\b(send|sent|deposit|deposited|paid|funds?\s+sent|transfer(?:red)?|top\s*up|money\s+sent|check\s+deposit)\b/i.test(text);
+  // "funding", "add balance", "add to wallet" are how clients announce they're sending money.
+  const hasDepositWords = /\b(send|sent|deposit|deposited|paid|funds?\s+sent|transfer(?:red)?|top\s*up|money\s+sent|check\s+deposit|funding|add\s+balance|add\s+to\s+wallet|add\s+payment\s+to\s+wallet|balance\s+to\s+(our\s+)?wallet)\b/i.test(text);
   const hasAmount = /(?:\$|usd\s*)?\d+(?:[,.]\d+)?\s*(?:k|K)?\s*(?:usdt|usd|dollars?|\$)?/i.test(text);
   const asksToCheck = /\b(check|confirm|please\s+check|check\s+please)\b/i.test(text);
 

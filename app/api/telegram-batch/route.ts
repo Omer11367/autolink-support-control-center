@@ -84,7 +84,7 @@ type LinkedFollowUpContext = {
   extractedData: Record<string, unknown>;
 };
 
-const CATEGORY_ORDER = ["Share", "Unshare", "Deposits", "Payment Issues", "Verification", "Account Issues", "Replacement", "General"] as const;
+const CATEGORY_ORDER = ["Account Creation", "Share", "Unshare", "Deposits", "Payment Issues", "Verification", "Account Issues", "Replacement", "General"] as const;
 // Cron fires every 5 min on wall-clock boundaries (:00, :05, :10, …). To make a message
 // sent at 1:03 visible to the 1:05 batch, the eligibility cutoff must be tight (1 min).
 // A message arriving exactly at 1:04 still passes the 1:05 cutoff (lte 1:04 includes equal).
@@ -137,7 +137,7 @@ function isPureNonSupportChatter(text: string): boolean {
   const normalized = normalizeComparableText(text);
   const trimmed = text.trim();
   const reactionOnly = /^[\s\u{1F44D}\u2764\uFE0F\u2705\u{1F64F}]+$/u.test(trimmed);
-  const chatter = ["hi", "hello", "hey", "yo", "good morning", "good evening", "good night", "thanks", "thank you", "thx", "ty", "ok", "okay", "alright", "received", "noted"];
+  const chatter = ["hi", "hello", "hey", "yo", "good morning", "good evening", "good night", "thanks", "thank you", "thx", "ty", "ok", "okay", "alright", "received", "noted", "greetings"];
   // Multi-word greetings: "hey guys", "hi team", "hello everyone", "hi all", etc.
   const isMultiWordGreeting = /^(hey|hi|hello|yo|sup|heya|hiya)\s+(guys|team|all|everyone|y'?all|there|guys|fellas|folks)\.?!?$/i.test(trimmed);
   // Social greetings that are clearly not support requests: "how are you guys?", "how r u", "how's it going" etc.
@@ -149,7 +149,7 @@ function isPureNonSupportChatter(text: string): boolean {
 
 function isGreetingText(text: string): boolean {
   const normalized = normalizeComparableText(text);
-  if (["hi", "hello", "hey", "yo", "good morning", "good evening", "good night"].includes(normalized)) return true;
+  if (["hi", "hello", "hey", "yo", "good morning", "good evening", "good night", "greetings"].includes(normalized)) return true;
   // Social greetings: "how are you", "how are you guys", "what's up", etc.
   const trimmed = text.trim();
   // Multi-word greetings: "hey guys", "hi team", "hello everyone"
@@ -186,12 +186,15 @@ function isFollowUpText(text: string): boolean {
 
 function mapIntentToCategory(intent: string | null | undefined): typeof CATEGORY_ORDER[number] {
   const normalized = String(intent || "").toLowerCase();
+  if (["process_account_creation"].includes(normalized)) return "Account Creation";
   if (["share_ad_account", "transfer_ad_account"].includes(normalized)) return "Share";
   if (["unshare_ad_account"].includes(normalized)) return "Unshare";
   if (["deposit_funds"].includes(normalized)) return "Deposits";
   if (["payment_issue", "refund_request"].includes(normalized)) return "Payment Issues";
   if (["verify_account"].includes(normalized)) return "Verification";
-  if (["check_account_status", "request_data_banned_accounts", "check_policy"].includes(normalized)) return "Account Issues";
+  if (["check_account_status", "request_data_banned_accounts", "check_policy",
+    "pause_campaigns", "appeal_review", "account_not_visible", "rename_account",
+    "request_account_ids"].includes(normalized)) return "Account Issues";
   if (["replacement_request"].includes(normalized)) return "Replacement";
   // site_issue, check_availability, get_spend_report, request_accounts, remaining_balance, general_support → General
   return "General";
@@ -309,6 +312,14 @@ function cleanTaskText(ticket: BatchTicket): string {
   const verifyAction = actions.find((action) => action.type === "verify_account");
   const accountStatusAction = actions.find((action) => action.type === "account_status_check");
 
+  if (category === "Account Creation") {
+    // Extract count if client mentioned a number: "I requested 20 more accounts"
+    const numMatch = original.match(/\b(\d+)\s*(?:more\s+)?(?:ad\s+)?accs?(?:ounts?)?\b/i)
+      ?? original.match(/\b(\d+)\s+(?:more\s+)?(?:new\s+)?accounts?\b/i);
+    const count = numMatch?.[1];
+    return count ? `process ${count} account creation request(s)` : "process account creation request";
+  }
+
   if (category === "Share") {
     const account = firstAccount(shareAction) ?? extractEntityAfter(original, ["account", "accounts", "acc", "ad account", "ad accounts"]);
     const bm = formatBm(shareAction?.bm) ?? extractEntityAfter(original, ["bm", "business manager"]);
@@ -349,8 +360,15 @@ function cleanTaskText(ticket: BatchTicket): string {
 
   if (category === "Account Issues") {
     const account = firstAccount(accountStatusAction) ?? extractEntityAfter(original, ["account", "accounts", "acc", "ad account", "ad accounts"]);
-    if (/\b(campaigns?\s+stopped|campaigns?\s+paused|ads?\s+stopped|ads?\s+paused|not\s+running|not\s+delivering)\b/i.test(original)) {
-      return account ? `campaigns stopped on account ${account}` : "campaigns stopped / not running";
+    // Intent-specific labels for new sub-types
+    if (ticket.intent === "pause_campaigns") return account ? `pause campaigns on account ${account}` : "pause / stop campaigns request";
+    if (ticket.intent === "appeal_review") return account ? `appeal / review request for account ${account}` : "appeal / review request";
+    if (ticket.intent === "rename_account") return "rename account request";
+    if (ticket.intent === "account_not_visible") return account ? `account ${account} not visible in BM` : "account not visible in BM";
+    if (ticket.intent === "request_account_ids") return "account IDs request";
+    // Existing campaign / disabled detection
+    if (/\b(campaigns?\s+stopped|campaigns?\s+paused|ads?\s+stopped|ads?\s+paused|not\s+running|not\s+delivering|not\s+spending|no\s+spend)\b/i.test(original)) {
+      return account ? `campaigns stopped on account ${account}` : "campaigns stopped / not spending";
     }
     if (account && /\b(disabled|restricted|blocked)\b/i.test(original)) return `account ${account} disabled`;
     return account ? `account issue on account ${account}` : "account issue reported";
@@ -437,6 +455,7 @@ function buildMarkSummary(tickets: BatchTicket[]): string {
   }
 
   const headings: Record<typeof CATEGORY_ORDER[number], string> = {
+    "Account Creation": "ACCOUNT CREATION",
     Share: "SHARE REQUESTS",
     Unshare: "UNSHARE REQUESTS",
     Deposits: "DEPOSITS",
@@ -480,13 +499,21 @@ function chooseClientReply(tickets: BatchTicket[]): string {
   }
 
   // Single category — pick a tailored reply.
+  if (categories.includes("Account Creation")) return "Got it, we'll process the account creation and update you once done.";
   if (categories.includes("Deposits")) return "Got it! We received your deposit — we'll verify and confirm shortly.";
   if (categories.includes("Payment Issues")) return "Got it, we'll look into the payment issue and get back to you.";
   if (categories.includes("Share") && categories.includes("Unshare")) return "Sure, we'll handle your account requests and update you.";
   if (categories.includes("Share")) return "Sure, we'll take care of the share request and update you.";
   if (categories.includes("Unshare")) return "Sure, we'll process the unshare request and update you.";
   if (categories.includes("Verification")) return "Got it, we'll check the verification and update you.";
-  if (categories.includes("Account Issues")) return "Got it, we'll look into the account issue and update you.";
+  if (categories.includes("Account Issues")) {
+    if (intents.some((i) => i === "pause_campaigns")) return "Got it, we'll pause the campaigns and confirm once done.";
+    if (intents.some((i) => i === "appeal_review")) return "Got it, we'll submit the review request to Meta and update you.";
+    if (intents.some((i) => i === "rename_account")) return "Sure, we'll rename the account and update you once done.";
+    if (intents.some((i) => i === "account_not_visible")) return "Got it, we'll check the BM access and update you.";
+    if (intents.some((i) => i === "request_account_ids")) return "Sure, we'll send you the account IDs shortly.";
+    return "Got it, we'll look into the account issue and update you.";
+  }
   if (categories.includes("Replacement")) return "Got it, we'll check on a replacement account and get back to you.";
 
   // General category — when there are multiple DIFFERENT intents the client asked about several
