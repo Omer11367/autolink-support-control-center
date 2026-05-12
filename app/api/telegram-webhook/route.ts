@@ -179,6 +179,92 @@ function extractRelevantAnswer(
   return relevant.length > 0 ? relevant.join(" ") : null;
 }
 
+// Uses Claude to intelligently route an employee's message to the correct client(s).
+// Returns a Map of chatId → the relevant portion of the message to send that client.
+// Returns null if the API call fails (caller should fall back to keyword routing).
+async function routeWithClaude(
+  employeeMessage: string,
+  clients: Array<{ chatId: string; chatTitle: string | null; intent: string | null; originalQuestion: string | null }>
+): Promise<Map<string, string> | null> {
+  const apiKey = process.env.ANTHROPIC_API_KEY;
+  if (!apiKey) return null;
+
+  const clientDescriptions = clients
+    .map((c, i) => {
+      const category = intentToCategory(c.intent);
+      const name = c.chatTitle ?? c.chatId;
+      const question = c.originalQuestion ? `"${c.originalQuestion.slice(0, 200)}"` : "(question not available)";
+      return `Client ${i + 1}: ID=${c.chatId}, Name="${name}", Category=${category}, Their question: ${question}`;
+    })
+    .join("\n");
+
+  const prompt = `You are a message router for a client support system. An employee answered questions in the internal team group.
+
+Employee message:
+"${employeeMessage}"
+
+Client requests that were in this batch:
+${clientDescriptions}
+
+Your job: Decide which clients should receive this employee message (or a relevant portion of it).
+
+Rules:
+- Each client should ONLY receive content that directly answers THEIR specific question/category.
+- If the message covers multiple topics, split it and send each client only the relevant part.
+- If the message is entirely about one topic, only the client with that request should receive it.
+- Do NOT send messages to clients whose question this does not answer.
+- Keep the forwarded text natural — do not add explanations or modify the meaning.
+
+Respond with ONLY valid JSON (no explanation, no markdown):
+{"routing":[{"chatId":"<client chat id>","text":"<exact text to forward to this client>"}]}
+
+Only include clients who should actually receive a message. If no client is relevant, return {"routing":[]}.`;
+
+  try {
+    const res = await fetch("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "x-api-key": apiKey,
+        "anthropic-version": "2023-06-01"
+      },
+      body: JSON.stringify({
+        model: "claude-haiku-4-5",
+        max_tokens: 1024,
+        messages: [{ role: "user", content: prompt }]
+      })
+    });
+
+    if (!res.ok) {
+      console.error("claude-routing-api-error", { status: res.status });
+      return null;
+    }
+
+    const data = (await res.json()) as { content?: Array<{ type: string; text: string }> };
+    const rawText = data.content?.find((b) => b.type === "text")?.text ?? "";
+
+    // Extract JSON — Claude sometimes wraps it in markdown fences.
+    const jsonMatch = rawText.match(/\{[\s\S]*\}/);
+    if (!jsonMatch) return null;
+
+    const parsed = JSON.parse(jsonMatch[0]) as { routing?: Array<{ chatId: string; text: string }> };
+    if (!Array.isArray(parsed.routing)) return null;
+
+    const routing = new Map<string, string>();
+    for (const item of parsed.routing) {
+      if (item.chatId && item.text?.trim()) {
+        routing.set(String(item.chatId), item.text.trim());
+      }
+    }
+
+    console.log("claude-routing-success", { clientsIn: clients.length, clientsRouted: routing.size });
+    return routing.size > 0 ? routing : null;
+  } catch (err) {
+    console.error("claude-routing-error", { error: err instanceof Error ? err.message : "unknown" });
+    return null;
+  }
+}
+
 export async function GET() {
   return NextResponse.json({
     ok: true,
@@ -269,7 +355,7 @@ export async function POST(request: Request) {
       // Find all tickets from this batch (they all share the same internal_message_id = batch summary msg id).
       const { data: batchTickets, error: ticketError } = await supabase
         .from("tickets")
-        .select("id, client_chat_id, intent, extracted_data")
+        .select("id, client_chat_id, intent, extracted_data, client_original_message")
         .eq("internal_message_id", replyToMsgId)
         .not("client_chat_id", "is", null);
 
@@ -278,14 +364,16 @@ export async function POST(request: Request) {
         return NextResponse.json({ ok: true, ignored: "no_matching_tickets" });
       }
 
-      // Group tickets by client_chat_id.
-      const byClient = new Map<string, Array<{ id: string; intent: string | null; chatTitle: string | null }>>();
+      // Group tickets by client_chat_id, carrying the original question for AI routing context.
+      type ClientTicket = { id: string; intent: string | null; chatTitle: string | null; originalQuestion: string | null };
+      const byClient = new Map<string, ClientTicket[]>();
       for (const t of batchTickets) {
         const key = String(t.client_chat_id);
         const chatTitle = (typeof t.extracted_data === "object" && t.extracted_data !== null)
           ? String((t.extracted_data as Record<string, unknown>).chatTitle ?? "")
           : "";
-        byClient.set(key, [...(byClient.get(key) ?? []), { id: t.id, intent: t.intent, chatTitle: chatTitle || null }]);
+        const originalQuestion = (t as { client_original_message?: string | null }).client_original_message ?? null;
+        byClient.set(key, [...(byClient.get(key) ?? []), { id: t.id, intent: t.intent, chatTitle: chatTitle || null, originalQuestion }]);
       }
 
       // Determine which clients should receive this employee message and WHAT text each gets.
@@ -307,40 +395,56 @@ export async function POST(request: Request) {
         const clientChatId = [...byClient.keys()][0]!;
         targets.push({ chatId: clientChatId, text: employeeText });
       } else {
-        // Multiple clients — two-pass routing so no client gets missed.
-        //
-        // Pass 1: sentence-level extraction — each client gets only the sentences whose
-        //   keywords match their ticket category. This keeps answers clean and targeted.
-        //
-        // Pass 2: for any client that pass 1 missed, run the broader full-message relevance
-        //   check. If that matches (e.g. General catch-all: message > 15 chars), send the
-        //   FULL employee message to that client. This handles cases where the employee's
-        //   wording doesn't perfectly match the narrow sentence-level keyword patterns.
-        const unmatchedClients: Array<[string, Array<{ id: string; intent: string | null; chatTitle: string | null }>]> = [];
+        // Multiple clients — try Claude AI routing first for accurate semantic splitting.
+        // Claude reads each client's original question and category, then decides which
+        // client(s) the employee's answer applies to and what portion to send each.
+        // Falls back to two-pass keyword extraction if Claude is unavailable or errors out.
+        const clientsForAI = [...byClient.entries()].map(([cId, tickets]) => ({
+          chatId: cId,
+          chatTitle: tickets[0]?.chatTitle ?? null,
+          intent: tickets[0]?.intent ?? null,
+          originalQuestion: tickets[0]?.originalQuestion ?? null
+        }));
 
-        for (const [clientChatId, clientTickets] of byClient.entries()) {
-          const relevantText = extractRelevantAnswer(employeeText, clientTickets);
-          if (relevantText) {
-            targets.push({ chatId: clientChatId, text: relevantText });
-            console.log("mark-reply-extracted-for-client", { clientChatId, originalLen: employeeText.length, extractedLen: relevantText.length });
-          } else {
-            unmatchedClients.push([clientChatId, clientTickets]);
+        const aiRouting = await routeWithClaude(employeeText, clientsForAI);
+
+        if (aiRouting && aiRouting.size > 0) {
+          // Claude successfully routed — use its decisions directly.
+          for (const [cId, routedText] of aiRouting.entries()) {
+            targets.push({ chatId: cId, text: routedText });
+            console.log("mark-reply-claude-routed", { clientChatId: cId, textLen: routedText.length });
           }
-        }
+        } else {
+          // Fallback: two-pass keyword extraction.
+          console.log("mark-reply-falling-back-to-keyword-extraction", { clients: byClient.size });
+          const unmatchedClients: Array<[string, Array<{ id: string; intent: string | null; chatTitle: string | null }>]> = [];
 
-        // Pass 2: broader relevance check for clients that sentence extraction didn't cover.
-        for (const [clientChatId, clientTickets] of unmatchedClients) {
-          if (isRelevantForClient(employeeLower, clientTickets)) {
-            targets.push({ chatId: clientChatId, text: employeeText });
-            console.log("mark-reply-fullmsg-fallback-for-client", { clientChatId });
+          // Pass 1: sentence-level extraction — each client gets only the sentences whose
+          //   keywords match their ticket category.
+          for (const [clientChatId, clientTickets] of byClient.entries()) {
+            const relevantText = extractRelevantAnswer(employeeText, clientTickets);
+            if (relevantText) {
+              targets.push({ chatId: clientChatId, text: relevantText });
+              console.log("mark-reply-extracted-for-client", { clientChatId, originalLen: employeeText.length, extractedLen: relevantText.length });
+            } else {
+              unmatchedClients.push([clientChatId, clientTickets]);
+            }
           }
-        }
 
-        // Final fallback: if neither pass matched anyone, forward full message to all clients.
-        if (targets.length === 0) {
-          console.log("mark-reply-extraction-fallback-all-clients", { clientCount: byClient.size });
-          for (const clientChatId of byClient.keys()) {
-            targets.push({ chatId: clientChatId, text: employeeText });
+          // Pass 2: broader relevance check for clients that sentence extraction didn't cover.
+          for (const [clientChatId, clientTickets] of unmatchedClients) {
+            if (isRelevantForClient(employeeLower, clientTickets)) {
+              targets.push({ chatId: clientChatId, text: employeeText });
+              console.log("mark-reply-fullmsg-fallback-for-client", { clientChatId });
+            }
+          }
+
+          // Final fallback: if neither pass matched anyone, forward full message to all clients.
+          if (targets.length === 0) {
+            console.log("mark-reply-extraction-fallback-all-clients", { clientCount: byClient.size });
+            for (const clientChatId of byClient.keys()) {
+              targets.push({ chatId: clientChatId, text: employeeText });
+            }
           }
         }
       }

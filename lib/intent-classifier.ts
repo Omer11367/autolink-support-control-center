@@ -68,6 +68,7 @@ const RULES: IntentRule[] = [
       "usdt",
       "sent money",
       "sent",
+      "send",
       "dollar",
       "usd",
       "payment proof",
@@ -75,6 +76,8 @@ const RULES: IntentRule[] = [
       "transaction hash",
       "tx hash",
       "etherscan",
+      "polygonscan",
+      "bscscan",
       "check deposit",
       "please confirm deposit",
       "please check payment"
@@ -514,8 +517,9 @@ function hasPaymentIssuePriority(text: string): boolean {
 function hasDepositPriority(text: string): boolean {
   if (hasPaymentIssuePriority(text)) return false;
 
-  const hasTransferProof = /\b(payment\s+proof|proof\s+of\s+payment|transaction\s+hash|tx\s+hash|etherscan|usdt|trc20|erc20|hash)\b|https?:\/\/\S*etherscan\S*/i.test(text);
-  const hasDepositWords = /\b(sent|deposit|deposited|paid|funds?\s+sent|transfer(?:red)?|top\s*up|money\s+sent|check\s+deposit)\b/i.test(text);
+  const hasTransferProof = /\b(payment\s+proof|proof\s+of\s+payment|transaction\s+hash|tx\s+hash|etherscan|polygonscan|bscscan|tronscan|usdt|trc20|erc20|hash)\b|https?:\/\/\S*(?:etherscan|polygonscan|bscscan|tronscan|blockchain)\S*/i.test(text);
+  // "send" (present tense) is intentionally included: "guys send 25k" is a deposit notification.
+  const hasDepositWords = /\b(send|sent|deposit|deposited|paid|funds?\s+sent|transfer(?:red)?|top\s*up|money\s+sent|check\s+deposit)\b/i.test(text);
   const hasAmount = /(?:\$|usd\s*)?\d+(?:[,.]\d+)?\s*(?:k|K)?\s*(?:usdt|usd|dollars?|\$)?/i.test(text);
   const asksToCheck = /\b(check|confirm|please\s+check|check\s+please)\b/i.test(text);
 
