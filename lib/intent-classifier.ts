@@ -168,9 +168,10 @@ const RULES: IntentRule[] = [
     intent: "site_issue",
     phrases: [
       "site is down", "site down", "website down", "site not working", "website not working",
-      "cant load", "cannot load", "doesnt load", "doesn't load", "not loading",
-      "cant open", "cannot open", "cant access", "cannot access", "not accessible",
-      "cant see the site", "can't see the site", "page not loading", "link not working", "link is down"
+      "cant load", "can't load", "cannot load", "doesnt load", "doesn't load", "not loading",
+      "cant open", "can't open", "cannot open", "cant access", "can't access", "cannot access",
+      "not accessible", "cant see the site", "can't see the site",
+      "page not loading", "link not working", "link is down", "website is down"
     ],
     completionOptions: ["Handled"]
   },
@@ -223,8 +224,11 @@ const RULES: IntentRule[] = [
       "submitted request for", "submitted requests", "submitted some more",
       "submitted for ad accounts", "i just submitted", "i've submitted",
       "we requested", "i requested accounts", "requested more accounts",
+      "requested new accounts", "requested new accs", "requested some accounts", "requested some accs",
+      "we requested new accounts", "we requested more accounts",
       "i have already applied", "i already applied", "already applied", "have already applied",
-      "already applied please check", "already applied, please check"
+      "already applied please check", "already applied, please check",
+      "haven't received the accounts", "haven't received them yet", "still haven't received"
     ],
     completionOptions: ["Done", "Handled"]
   },
