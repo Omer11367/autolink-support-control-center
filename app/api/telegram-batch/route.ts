@@ -860,6 +860,13 @@ async function createTicketsFromQueuedMessages(
       intent: string;
     };
 
+    // Pre-scan: does this chat's batch contain any photo at all?
+    // Used below to detect "photo sent separately + please check as text" — a very common
+    // pattern where the client sends the payment receipt as a photo, then types "please check"
+    // in a follow-up message. Without this flag the text message is classified as a fragment
+    // and held, the photo is never forwarded, and the client gets no reply.
+    const chatBatchHasPhoto = sortedUnprocessed.some((m) => getPhotoFileId(m) !== null);
+
     const perMessageItems: PerMessageItem[] = [];
     for (const message of sortedUnprocessed) {
       const rawText = preserveBatchText(message.message_text ?? "");
@@ -888,7 +895,13 @@ async function createTicketsFromQueuedMessages(
       // photo never reaches Mark and the client never gets a reply.
       const isPhotoMessage = message.message_type === "client_photo";
       const isPaymentCaption = /^(please\s*check|pls\s*check|check\s*please|check|sent|paid|deposit|please|pls|done)\.?!?$/i.test(text.trim());
-      const effectiveIntent = (isPhotoMessage && isPaymentCaption) ? "deposit_funds" : singleClassification.intent;
+      // Override to deposit_funds when:
+      // (a) the caption is ON the photo itself, OR
+      // (b) the text is a payment caption AND this chat's batch already contains a photo
+      //     (client sent photo + "please check" as two separate messages).
+      const effectiveIntent = ((isPhotoMessage && isPaymentCaption) || (chatBatchHasPhoto && isPaymentCaption))
+        ? "deposit_funds"
+        : singleClassification.intent;
       const category = mapIntentToCategory(effectiveIntent);
       perMessageItems.push({ message, text, category, intent: effectiveIntent });
     }
@@ -978,7 +991,11 @@ async function createTicketsFromQueuedMessages(
       // Skip fragment check when the group includes a photo — the photo is the substance,
       // so a short caption like "please check" or "sent" is NOT incomplete in this context.
       const groupHasPhoto = group.messages.some((m) => getPhotoFileId(m) !== null);
-      if (isIncompleteRequestFragment(groupedText) && !groupHasPhoto) {
+      // Also skip fragment hold when the group intent is deposit_funds and this chat's batch
+      // has a photo — covers the case where the client sent the photo as a separate message
+      // (no caption) and typed "please check" in a follow-up text message.
+      const isDepositCaptionAlongsidePhoto = group.intent === "deposit_funds" && chatBatchHasPhoto;
+      if (isIncompleteRequestFragment(groupedText) && !groupHasPhoto && !isDepositCaptionAlongsidePhoto) {
         console.log("support-fragment-held-for-next-batch", { chatId, groupedText });
         continue;
       }

@@ -122,7 +122,13 @@ const RULES: IntentRule[] = [
   },
   {
     intent: "request_accounts",
-    phrases: ["request accounts", "need account", "need accounts", "new account", "new accounts", "more account", "more accounts"],
+    // "more account(s)" removed — too ambiguous: "i requested more accounts" is process_account_creation,
+    // not a new request. Replaced with explicit "need more" / "want more" phrases so the distinction is clean.
+    phrases: [
+      "request accounts", "need account", "need accounts", "new account", "new accounts",
+      "need more accounts", "need more account", "want more accounts", "can we get more accounts",
+      "requesting accounts", "requesting more accounts"
+    ],
     completionOptions: ["Done", "Handled"]
   },
   {
