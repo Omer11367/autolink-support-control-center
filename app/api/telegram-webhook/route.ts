@@ -43,12 +43,26 @@ type TelegramMessage = {
   };
 };
 
+type TelegramChatMemberStatus = "creator" | "administrator" | "member" | "restricted" | "left" | "kicked";
+
+type TelegramChatMember = {
+  status: TelegramChatMemberStatus;
+  user: { id: number; is_bot?: boolean };
+};
+
+type TelegramMyChatMember = {
+  chat: TelegramChat;
+  old_chat_member: TelegramChatMember;
+  new_chat_member: TelegramChatMember;
+};
+
 type TelegramUpdate = {
   update_id: number;
   message?: TelegramMessage;
   edited_message?: TelegramMessage;
   channel_post?: TelegramMessage;
   edited_channel_post?: TelegramMessage;
+  my_chat_member?: TelegramMyChatMember;
 };
 
 function firstEnv(names: string[]): string | undefined {
@@ -313,6 +327,29 @@ export async function POST(request: Request) {
     ]);
 
     const update = (await request.json()) as TelegramUpdate;
+
+    // ── Bot added / promoted to group ────────────────────────────────────────────────────────────
+    // Register the group immediately so it shows up in the routing dashboard without waiting
+    // for the first user message. Fires when the bot is added to a group or its status changes.
+    if (update.my_chat_member) {
+      const { chat, new_chat_member } = update.my_chat_member;
+      const isActiveInGroup = ["administrator", "member"].includes(new_chat_member.status);
+      if (isActiveInGroup && chat.id) {
+        const chatId = String(chat.id);
+        const groupName = chat.title?.trim() ?? `Group ${chatId}`;
+        const { error: upsertErr } = await supabase.from("client_groups").upsert(
+          { telegram_chat_id: chatId, group_name: groupName, group_type: null, updated_at: new Date().toISOString() },
+          { onConflict: "telegram_chat_id", ignoreDuplicates: true }
+        );
+        if (upsertErr) {
+          console.error("my-chat-member-group-register-failed", { chatId, groupName, error: upsertErr.message });
+        } else {
+          console.log("my-chat-member-group-registered", { chatId, groupName, status: new_chat_member.status });
+        }
+      }
+      return NextResponse.json({ ok: true, status: "my_chat_member_handled" });
+    }
+
     const message = update.message ?? update.edited_message ?? update.channel_post ?? update.edited_channel_post;
 
     if (!message?.chat?.id) {
@@ -524,10 +561,14 @@ export async function POST(request: Request) {
 
     if (!knownGroup) {
       // First message ever from this group — register it as unclassified.
-      await supabase.from("client_groups").upsert(
+      const { error: regErr } = await supabase.from("client_groups").upsert(
         { telegram_chat_id: String(chatId), group_name: groupName, group_type: null, updated_at: new Date().toISOString() },
         { onConflict: "telegram_chat_id" }
       );
+      if (regErr) {
+        console.error("new-group-register-failed", { chatId, groupName, error: regErr.message });
+        return NextResponse.json({ ok: false, error: "group_register_failed" }, { status: 500 });
+      }
       console.log("new-group-auto-registered", { chatId, groupName });
       return NextResponse.json({ ok: true, status: "new_group_registered" });
     }
