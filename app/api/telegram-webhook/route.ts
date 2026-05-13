@@ -312,11 +312,6 @@ export async function POST(request: Request) {
       ...(markGroupChatId ? [markGroupChatId] : [])
     ]);
 
-    // Master groups: bot is silent — ignore everything, no employee reply handling.
-    if (masterChatIds.has(String(chatId))) {
-      return NextResponse.json({ ok: true, status: "master_group_ignored" });
-    }
-
     const update = (await request.json()) as TelegramUpdate;
     const message = update.message ?? update.edited_message ?? update.channel_post ?? update.edited_channel_post;
 
@@ -325,6 +320,11 @@ export async function POST(request: Request) {
     }
 
     const chatId = message.chat.id;
+
+    // Master groups: bot is completely silent — ignore everything sent there.
+    if (masterChatIds.has(String(chatId))) {
+      return NextResponse.json({ ok: true, status: "master_group_ignored" });
+    }
 
     // ── Employee message from an agency group (Mark / Momo / Bobo / etc.) ───────────────────────
     // When an employee answers in any agency group, the bot analyzes their text and forwards
