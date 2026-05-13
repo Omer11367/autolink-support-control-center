@@ -187,7 +187,7 @@ function isFollowUpText(text: string): boolean {
 
 function mapIntentToCategory(intent: string | null | undefined): typeof CATEGORY_ORDER[number] {
   const normalized = String(intent || "").toLowerCase();
-  if (["process_account_creation"].includes(normalized)) return "Account Creation";
+  if (["process_account_creation", "request_accounts"].includes(normalized)) return "Account Creation";
   if (["share_ad_account", "transfer_ad_account"].includes(normalized)) return "Share";
   if (["unshare_ad_account"].includes(normalized)) return "Unshare";
   if (["deposit_funds"].includes(normalized)) return "Deposits";
@@ -314,10 +314,17 @@ function cleanTaskText(ticket: BatchTicket): string {
   const accountStatusAction = actions.find((action) => action.type === "account_status_check");
 
   if (category === "Account Creation") {
-    // Extract count if client mentioned a number: "I requested 20 more accounts"
-    const numMatch = original.match(/\b(\d+)\s*(?:more\s+)?(?:ad\s+)?accs?(?:ounts?)?\b/i)
+    // Extract digit count: "I requested 20 more accounts" → "20"
+    const numMatch = original.match(/\b(\d+)\s*(?:more\s+|new\s+|additional\s+)?(?:ad\s+)?accs?(?:ounts?)?\b/i)
       ?? original.match(/\b(\d+)\s+(?:more\s+)?(?:new\s+)?accounts?\b/i);
-    const count = numMatch?.[1];
+    // Extract word count: "I need twenty new accounts" → "twenty"
+    const wordNumMatch = !numMatch ? original.match(/\b(one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|fifteen|twenty|thirty|forty|fifty|hundred)\s+(?:new\s+|more\s+|additional\s+)?(?:ad\s+)?accounts?\b/i) : null;
+    const count = numMatch?.[1] ?? wordNumMatch?.[1] ?? null;
+    // "request_accounts" = client is requesting new accounts (hasn't submitted yet)
+    // "process_account_creation" = client already submitted, wants us to process it
+    if (ticket.intent === "request_accounts") {
+      return count ? `requesting ${count} new account(s)` : "requesting new accounts";
+    }
     return count ? `process ${count} account creation request(s)` : "process account creation request";
   }
 
@@ -503,7 +510,10 @@ function chooseClientReply(tickets: BatchTicket[]): string {
   }
 
   // Single category — pick a tailored reply.
-  if (categories.includes("Account Creation")) return "Got it, we'll process the account creation and update you once done.";
+  if (categories.includes("Account Creation")) {
+    if (intents.some((i) => i === "request_accounts")) return "Got it, we'll check on account availability and get back to you shortly.";
+    return "Got it, we'll process the account creation and update you once done.";
+  }
   if (categories.includes("Deposits")) return "Got it! We received your deposit — we'll verify and confirm shortly.";
   if (categories.includes("Payment Issues")) return "Got it, we'll look into the payment issue and get back to you.";
   if (categories.includes("Share") && categories.includes("Unshare")) return "Sure, we'll handle your account requests and update you.";
@@ -999,6 +1009,7 @@ async function createTicketsFromQueuedMessages(
     // ── Step 4: create one ticket per category group ────────────────────────────────────────────
     const duplicateStartIso = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
     let ticketsCreatedForChat = 0;
+    let hasRealTickets = false; // true only when a non-deposit ticket is actually inserted in DB
 
     for (const group of messageGroups) {
       const groupedText = preserveBatchText(group.texts.join("\n"));
@@ -1186,11 +1197,13 @@ async function createTicketsFromQueuedMessages(
       console.log("request-added-to-mark-batch", { chatId, ticketId: createdTicket.id, intent: classification.intent });
       createdTickets.push(createdTicket as BatchTicket);
       ticketsCreatedForChat++;
+      hasRealTickets = true;
     }
 
-    // If all groups were no-action / fragments, mark the chat so processedThroughMs advances.
-    if (ticketsCreatedForChat === 0) {
-      await markChatBatchProcessed(supabase, chatId, "batch_non_request_skipped", "no-action batch skipped", null, lastMessageMs);
+    // Write a marker when no real DB ticket was created (deposit-only, deposit link, duplicate-only,
+    // or no-action batches) so processedThroughMs advances and the same messages aren't re-processed.
+    if (!hasRealTickets) {
+      await markChatBatchProcessed(supabase, chatId, "batch_non_request_skipped", "deposit-ack or no-action batch", null, lastMessageMs);
     }
 
     // Accumulate photo forwards for this chat (only when at least one ticket was created,
@@ -1315,7 +1328,7 @@ async function handleBatch(request: Request) {
   ];
   console.log("mark-batch-found-requests", { count: tickets.length });
 
-  if (tickets.length === 0 && depositLinkUpdates.length === 0) {
+  if (tickets.length === 0 && depositLinkUpdates.length === 0 && chatDuplicateIntents.size === 0) {
     console.log("mark-batch-no-requests");
     return NextResponse.json({ ok: true, count: 0 });
   }

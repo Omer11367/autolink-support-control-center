@@ -35,22 +35,46 @@ type IntentRule = {
 const RULES: IntentRule[] = [
   {
     intent: "share_ad_account",
-    phrases: ["share", "share account", "share accounts", "add", "connect", "give access", "grant access", "attach", "link", "add acc to bm", "add to bm", "add accs to bm", "add accounts to bm", "put in bm", "put on bm", "add to both bms", "both bms", "share to both", "add to both", "same accounts to both", "add same accs"],
+    phrases: [
+      "share", "share account", "share accounts", "share the account", "share this account", "share these accounts",
+      "please share", "can you share", "could you share",
+      "add", "connect", "give access", "grant access", "attach", "link",
+      "add acc to bm", "add to bm", "add accs to bm", "add accounts to bm",
+      "add this account", "add the account", "add these accounts", "add account to",
+      "please add", "can you add", "could you add",
+      "put in bm", "put on bm", "add to both bms", "both bms", "share to both", "add to both",
+      "same accounts to both", "add same accs", "need to add", "want to add"
+    ],
     completionOptions: ["Done", "Already shared", "Only view access"]
   },
   {
     intent: "unshare_ad_account",
-    phrases: ["unbind", "unshare", "unsher", "remove bm", "remove access", "remove from bm", "disconnect", "unlink", "revoke access", "take out from bm"],
+    phrases: [
+      "unbind", "unshare", "unsher", "remove bm", "remove access", "remove from bm",
+      "disconnect", "unlink", "revoke access", "take out from bm",
+      "please remove", "can you remove", "could you remove", "remove the account", "remove this account",
+      "remove these accounts", "remove account from", "remove from the bm",
+      "please unshare", "can you unshare", "please unbind", "delete from bm",
+      "take off", "take out", "kick from bm", "remove all accounts", "unshare all"
+    ],
     completionOptions: ["Done", "Handled"]
   },
   {
     intent: "transfer_ad_account",
-    phrases: ["transfer", "move accounts", "new bm", "switch bm", "replace bm", "delete from bm", "change bm", "move to bm", "and delete from", "remove from old bm", "change business manager"],
+    phrases: [
+      "transfer", "move accounts", "new bm", "switch bm", "replace bm",
+      "delete from bm", "change bm", "move to bm", "and delete from",
+      "remove from old bm", "change business manager", "move to new bm"
+    ],
     completionOptions: ["Done", "Handled"]
   },
   {
     intent: "verify_account",
-    phrases: ["verify", "verification"],
+    phrases: [
+      "verify", "verification", "please verify", "can you verify",
+      "verify this", "verify the account", "verify my account",
+      "need verification", "need to verify", "account verification"
+    ],
     completionOptions: ["Done", "Handled"]
   },
   {
@@ -122,12 +146,16 @@ const RULES: IntentRule[] = [
   },
   {
     intent: "request_accounts",
-    // "more account(s)" removed — too ambiguous: "i requested more accounts" is process_account_creation,
-    // not a new request. Replaced with explicit "need more" / "want more" phrases so the distinction is clean.
     phrases: [
       "request accounts", "need account", "need accounts", "new account", "new accounts",
       "need more accounts", "need more account", "want more accounts", "can we get more accounts",
-      "requesting accounts", "requesting more accounts"
+      "requesting accounts", "requesting more accounts",
+      "can we get accounts", "can we have accounts", "can we request accounts",
+      "want accounts", "want new accounts", "get accounts", "get new accounts",
+      "provide accounts", "provide us accounts", "send us accounts", "give us accounts",
+      "order accounts", "order new accounts", "we need accounts", "i need accounts",
+      "looking for accounts", "looking to get accounts", "need ad accounts",
+      "new ad accounts", "need new ad accounts", "want ad accounts"
     ],
     completionOptions: ["Done", "Handled"]
   },
@@ -150,6 +178,9 @@ const RULES: IntentRule[] = [
   {
     intent: "check_account_status",
     phrases: ["status", "check status", "account status", "active", "blocked", "disabled", "restricted", "banned", "usable", "can run ads", "account problem",
+      "fix my account", "fix account", "fix the account", "fix this account", "fix our account",
+      "issue with my account", "issue with the account", "problem with my account", "problem with the account",
+      "my account is not working", "account is not working", "account not working", "something wrong with my account",
       "campaigns stopped", "campaigns paused", "campaigns not running", "campaigns not delivering",
       "ads stopped", "ads paused", "ads not running", "ads not delivering", "ads not working",
       "campaigns disabled", "stopped running", "not running anymore",
@@ -228,7 +259,10 @@ const RULES: IntentRule[] = [
       "we requested new accounts", "we requested more accounts",
       "i have already applied", "i already applied", "already applied", "have already applied",
       "already applied please check", "already applied, please check",
-      "haven't received the accounts", "haven't received them yet", "still haven't received"
+      "haven't received the accounts", "haven't received them yet", "still haven't received",
+      "waiting for accounts", "waiting for my accounts", "where are my accounts",
+      "when will i get", "when will we get", "sent the form", "filled the form",
+      "applied for accounts", "application for accounts", "submitted the request"
     ],
     completionOptions: ["Done", "Handled"]
   },
@@ -662,7 +696,58 @@ function hasDepositPriority(text: string): boolean {
 }
 
 function hasAccountIssuePriority(text: string): boolean {
-  return /\b(?:account\s+)?(?:disabled|restricted|banned|blocked)|account\s+problem\b/i.test(text);
+  return /\b(?:account\s+)?(?:disabled|restricted|banned|blocked)|account\s+problem\b/i.test(text)
+    || /\bfix\s+(?:my\s+|the\s+|this\s+|our\s+)?(?:ad\s+)?account\b/i.test(text)
+    || /\b(?:issue|problem)\s+with\s+(?:my\s+|the\s+|this\s+|our\s+)?(?:ad\s+)?account\b/i.test(text);
+}
+
+// Semantic fallback: catches common intent patterns when no RULE phrase matched.
+// Uses broader regex rather than exact phrases so natural / paraphrased messages
+// still get the right category instead of falling through to general_support.
+function semanticFallbackIntent(text: string): string | null {
+  const t = text.toLowerCase();
+
+  // Share: action word near account/bm context (not removal)
+  if (/\b(?:please\s+)?(?:share|add|connect|link|attach|give|grant)\b.{0,60}\b(?:account|acc|bm|business\s*manager)\b/i.test(t)
+    && !/\b(?:remove|unshare|delete|revoke|disconnect|unlink)\b/i.test(t)) {
+    return "share_ad_account";
+  }
+
+  // Unshare: removal word near account/bm context
+  if (/\b(?:please\s+)?(?:unshare|remove|disconnect|unlink|revoke|unbind|take\s+out|delete)\b.{0,60}\b(?:account|acc|bm|business\s*manager)\b/i.test(t)) {
+    return "unshare_ad_account";
+  }
+
+  // Account request with written-out number ("twenty new accounts")
+  if (/\b(?:need|want|get|provide|give|send|request(?:ing|ed)?|can\s+(?:we|i|you)|could\s+you|would\s+like)\b.{0,50}\b(?:one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|fifteen|twenty|thirty|forty|fifty|hundred|\d+)\b.{0,30}\b(?:ad\s+)?accounts?\b/i.test(t)) {
+    return "request_accounts";
+  }
+
+  // Account request without a specific number ("can we get accounts", "provide us some accounts")
+  if (/\b(?:can\s+(?:we|i)|could\s+you|please)\s+(?:get|have|provide|send|give|order|request)\b.{0,50}\b(?:ad\s+)?accounts?\b/i.test(t)
+    && !/\b(?:share|add|remove|unshare|fix|issue|problem|disabled|banned)\b/i.test(t)) {
+    return "request_accounts";
+  }
+
+  // Deposit: client clearly announcing a payment in natural language
+  if (/\b(?:i(?:'ve|\s+have)?\s+(?:just\s+)?(?:sent|paid|transferred|made\s+a\s+payment|done\s+the\s+payment|completed\s+the\s+payment))\b/i.test(t)
+    && !/\b(?:share|add|remove|bm|account\s+(?:id|number))\b/i.test(t)) {
+    return "deposit_funds";
+  }
+
+  // Verification: asking to verify something
+  if (/\b(?:please\s+)?(?:can\s+you\s+)?verify\b.{0,40}\b(?:account|acc|bm|this|it)\b/i.test(t)
+    || /\bneed\s+(?:to\s+)?verif/i.test(t)) {
+    return "verify_account";
+  }
+
+  // Replacement: asking for a replacement account
+  if (/\b(?:give|send|provide|need|want|get)\b.{0,30}\b(?:replacement|new\s+one|another\s+account|substitute)\b/i.test(t)
+    || /\b(?:replace\s+(?:my|this|the|it|our)|account\s+(?:is|was)\s+(?:gone|lost|dead))\b/i.test(t)) {
+    return "replacement_request";
+  }
+
+  return null;
 }
 
 function hasAccountContextNear(text: string, start: number, end: number): boolean {
@@ -740,7 +825,11 @@ export function classifyIntent(message: string, previousContext = ""): Classifie
     return { rule, matched, score: matched.length };
   }).sort((a, b) => b.score - a.score);
 
-  const inferredRequestAccounts = /\b(?:need|request|want|more)\s+\d+\s+(?:ad\s+)?accounts?\b/i.test(combined);
+  // Matches digit-number AND word-number account requests ("need 5 accounts" / "need twenty accounts")
+  const inferredRequestAccounts =
+    /\b(?:need|request|want|provide|give|get|send)\s+\d+\s+(?:new\s+|more\s+|ad\s+)?accounts?\b/i.test(combined) ||
+    /\b(?:need|want|request(?:ing|ed)?|provide|give|get|send)\s+(?:one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|fifteen|twenty|thirty|forty|fifty|hundred)\s+(?:new\s+|more\s+|additional\s+)?(?:ad\s+)?accounts?\b/i.test(combined);
+
   const priorityIntent =
     hasPaymentIssuePriority(combined)
       ? "payment_issue"
@@ -749,6 +838,9 @@ export function classifyIntent(message: string, previousContext = ""): Classifie
         : hasAccountIssuePriority(combined)
           ? "check_account_status"
           : null;
+
+  const semanticFallback = !priorityIntent ? semanticFallbackIntent(combined) : null;
+
   const best = priorityIntent
     ? {
         rule: RULES.find((rule) => rule.intent === priorityIntent) ?? RULES[0],
@@ -762,7 +854,13 @@ export function classifyIntent(message: string, previousContext = ""): Classifie
           matched: ["numbered account request"],
           score: 1
         }
-      : undefined);
+      : semanticFallback
+        ? {
+            rule: RULES.find((rule) => rule.intent === semanticFallback) ?? RULES[0],
+            matched: [`semantic pattern: ${semanticFallback}`],
+            score: 1
+          }
+        : undefined);
   const intent = best?.rule.intent ?? "general_support";
   const matchedRules = best
     ? best.matched.map((phrase) => `Matched phrase: ${phrase}`)
