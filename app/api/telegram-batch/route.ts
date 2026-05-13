@@ -46,6 +46,7 @@ type PhotoForward = {
   fileId: string;
   category: string;        // e.g. "Deposits", "General", "Account Issues"
   requestSummary: string;  // e.g. "sent 30K" or "site is down" — from the client's own message
+  chatId: string;          // client's telegram_chat_id — used for agency routing
 };
 
 type BatchTicket = {
@@ -785,11 +786,12 @@ async function markChatBatchProcessed(
 }
 
 type ChatError = { chatId: string; error: string };
-type DepositLinkUpdate = { chatTitle: string; url: string; ticketId: string };
+type DepositLinkUpdate = { chatTitle: string; url: string; ticketId: string; chatId: string };
 
 async function createTicketsFromQueuedMessages(
   supabase: SupabaseAdminClient,
-  messages: QueuedMessage[]
+  messages: QueuedMessage[],
+  routingMap: Map<string, string>  // clientChatId → agency Telegram chat ID; empty = process all
 ): Promise<{ tickets: BatchTicket[]; photoForwards: PhotoForward[]; depositLinkUpdates: DepositLinkUpdate[]; chatErrors: ChatError[]; chatDuplicateIntents: Map<string, string[]> }> {
   const messagesByChat = new Map<string, QueuedMessage[]>();
   for (const message of messages) {
@@ -804,6 +806,12 @@ async function createTicketsFromQueuedMessages(
   const chatErrors: ChatError[] = [];
   const chatDuplicateIntents = new Map<string, string[]>();
   for (const [chatId, chatMessages] of messagesByChat.entries()) {
+    // Multi-agency routing: when routing is configured, skip chats that have not been
+    // assigned to any agency. Unassigned clients receive no reply and no ticket.
+    if (routingMap.size > 0 && !routingMap.has(chatId)) {
+      console.log("chat-skipped-not-assigned", { chatId });
+      continue;
+    }
     try {
     const { data: latestTicketData, error: latestTicketError } = await supabase
       .from("tickets")
@@ -984,7 +992,7 @@ async function createTicketsFromQueuedMessages(
         const rawSummary = matchedItem?.text ?? matchedGroup?.texts[0] ?? "";
         // Trim to 80 chars so the caption stays readable on mobile.
         const requestSummary = rawSummary.length > 80 ? rawSummary.slice(0, 77) + "…" : rawSummary;
-        chatPhotoForwards.push({ fileId: photoFileId, category: photoCategory, requestSummary });
+        chatPhotoForwards.push({ fileId: photoFileId, category: photoCategory, requestSummary, chatId });
       }
     }
 
@@ -1111,7 +1119,8 @@ async function createTicketsFromQueuedMessages(
             chatDepositLinkUpdates.push({
               chatTitle: getChatTitle(latestGroupMessage) ?? chatId,
               url: groupedText.trim(),
-              ticketId: sentDeposit.id
+              ticketId: sentDeposit.id,
+              chatId
             });
             ticketsCreatedForChat++; // count as handled — client will get ack reply
             chatDuplicateIntents.set(chatId, [...(chatDuplicateIntents.get(chatId) ?? []), "deposit_funds"]);
@@ -1217,7 +1226,9 @@ async function handleBatch(request: Request) {
   console.log("mark-batch-start");
 
   requireEnv("TELEGRAM_BOT_TOKEN", ["TELEGRAM_BOT_TOKEN"]);
-  const markGroupChatId = requireEnv("MARK_GROUP_CHAT_ID or MARK_INTERNAL_CHAT_ID", ["MARK_GROUP_CHAT_ID", "MARK_INTERNAL_CHAT_ID"]);
+  // markGroupChatId is optional when multi-agency routing is configured in Supabase.
+  // Validated below after we know whether DB routing is active.
+  const markGroupChatId = firstEnv(["MARK_GROUP_CHAT_ID", "MARK_INTERNAL_CHAT_ID"]) ?? "";
   const supabaseUrl = requireEnv("NEXT_PUBLIC_SUPABASE_URL or SUPABASE_URL", ["NEXT_PUBLIC_SUPABASE_URL", "SUPABASE_URL"]);
   const serviceRoleKey = requireEnv("SERVICE_ROLE_KEY or SUPABASE_SERVICE_ROLE_KEY", ["SERVICE_ROLE_KEY", "SUPABASE_SERVICE_ROLE_KEY"]);
 
@@ -1227,6 +1238,27 @@ async function handleBatch(request: Request) {
       autoRefreshToken: false
     }
   });
+
+  // ── Load multi-agency routing data ─────────────────────────────────────────────
+  // mark_groups: each agency has a name and its own Telegram group chat ID.
+  // client_groups: maps each client's telegram_chat_id to an agency (mark_group_id).
+  // When no assignments exist in the DB the bot falls back to the single markGroupChatId env var.
+  const [{ data: markGroupsData }, { data: clientGroupAssignments }] = await Promise.all([
+    supabase.from("mark_groups").select("id, name, telegram_chat_id"),
+    supabase.from("client_groups").select("telegram_chat_id, mark_group_id").not("mark_group_id", "is", null)
+  ]);
+  const markGroupById = new Map(
+    (markGroupsData ?? []).map((mg) => [mg.id, { name: mg.name, telegramChatId: mg.telegram_chat_id }])
+  );
+  // clientRoutingMap: clientChatId (string) → agency Telegram chat ID (string)
+  const clientRoutingMap = new Map<string, string>();
+  for (const cg of (clientGroupAssignments ?? [])) {
+    if (!cg.mark_group_id) continue;
+    const agency = markGroupById.get(cg.mark_group_id);
+    if (agency) clientRoutingMap.set(String(cg.telegram_chat_id), agency.telegramChatId);
+  }
+  const useMultiAgency = clientRoutingMap.size > 0;
+  console.log("routing-loaded", { useMultiAgency, agencyCount: markGroupById.size, assignedClients: clientRoutingMap.size });
 
   const batchCutoffIso = new Date(Date.now() - BATCH_DELAY_MINUTES * 60 * 1000).toISOString();
   const messageStartIso = new Date(Date.now() - MESSAGE_LOOKBACK_MINUTES * 60 * 1000).toISOString();
@@ -1240,7 +1272,7 @@ async function handleBatch(request: Request) {
     .limit(500);
   if (queuedMessagesError) throw new Error(`Supabase queued messages query failed: ${queuedMessagesError.message}`);
 
-  const { tickets: createdTickets, photoForwards, depositLinkUpdates, chatErrors, chatDuplicateIntents } = await createTicketsFromQueuedMessages(supabase, (queuedMessagesData ?? []) as unknown as QueuedMessage[]);
+  const { tickets: createdTickets, photoForwards, depositLinkUpdates, chatErrors, chatDuplicateIntents } = await createTicketsFromQueuedMessages(supabase, (queuedMessagesData ?? []) as unknown as QueuedMessage[], clientRoutingMap);
   if (chatErrors.length > 0) {
     console.error("batch-had-chat-errors", { count: chatErrors.length, errors: chatErrors });
   }
@@ -1263,82 +1295,132 @@ async function handleBatch(request: Request) {
     ...pendingTickets.filter((ticket) => !seenTicketIds.has(ticket.id))
   ];
   console.log("mark-batch-found-requests", { count: tickets.length });
+
   if (tickets.length === 0 && depositLinkUpdates.length === 0) {
     console.log("mark-batch-no-requests");
     return NextResponse.json({ ok: true, count: 0 });
   }
-  if (tickets.length === 0) {
-    // No new summary to send, but deposit link follow-ups still need to go out.
-    for (const update of depositLinkUpdates) {
+
+  // ── Multi-agency routing ────────────────────────────────────────────────────────
+  // Maps each ticket / photo / deposit update to the correct agency Mark group.
+  // When no routing is configured in Supabase (clientRoutingMap empty), all traffic
+  // goes to markGroupChatId (the legacy single-agency env var).
+  if (!useMultiAgency && !markGroupChatId) {
+    throw new Error("Missing environment variable: MARK_GROUP_CHAT_ID or MARK_INTERNAL_CHAT_ID (required when no agency routing is configured in Supabase)");
+  }
+
+  const getAgencyChatId = (clientChatId: string | number | null): string => {
+    const id = String(clientChatId ?? "");
+    if (clientRoutingMap.size > 0) return clientRoutingMap.get(id) ?? "";
+    return markGroupChatId;
+  };
+
+  // Collect the full set of agency chat IDs that have work in this batch.
+  const activeAgencies = new Set<string>();
+  for (const ticket of tickets) {
+    const agency = getAgencyChatId(ticket.client_chat_id);
+    if (agency) activeAgencies.add(agency);
+  }
+  for (const photo of photoForwards) {
+    const agency = getAgencyChatId(photo.chatId);
+    if (agency) activeAgencies.add(agency);
+  }
+  for (const update of depositLinkUpdates) {
+    const agency = getAgencyChatId(update.chatId);
+    if (agency) activeAgencies.add(agency);
+  }
+
+  console.log("mark-batch-ready", { count: tickets.length, agencies: activeAgencies.size });
+
+  // ── Send one summary per agency, stamp tickets, forward photos ─────────────────
+  let totalSentToMark = 0;
+
+  for (const agencyChatId of activeAgencies) {
+    const agencyTickets = tickets.filter((t) => getAgencyChatId(t.client_chat_id) === agencyChatId);
+    const agencyPhotos = photoForwards.filter((p) => getAgencyChatId(p.chatId) === agencyChatId);
+    const agencyDepositUpdates = depositLinkUpdates.filter((u) => getAgencyChatId(u.chatId) === agencyChatId);
+
+    // If this agency only has deposit link follow-ups (no tickets), send them and move on.
+    if (agencyTickets.length === 0) {
+      for (const update of agencyDepositUpdates) {
+        try {
+          const updateText = `🔗 Deposit link received — ${escapeTelegramHtml(update.chatTitle)}\n${update.url}`;
+          await maybeSendTelegramMessage({ chatId: agencyChatId, text: updateText, source: "telegram_batch" });
+          console.log("deposit-link-update-sent-to-mark", { ticketId: update.ticketId, agencyChatId });
+        } catch (err) {
+          console.error("deposit-link-update-failed", { error: err instanceof Error ? err.message : "unknown" });
+        }
+      }
+      continue;
+    }
+
+    // Build and send the batch summary for this agency.
+    const markSummary = buildMarkSummary(agencyTickets);
+    const markSendResult = await maybeSendTelegramMessage({ chatId: agencyChatId, text: markSummary, source: "telegram_batch" });
+    if (!markSendResult.sent || !markSendResult.telegramMessageId) {
+      console.error("mark-batch-summary-not-sent", { agencyChatId, reason: markSendResult.reason });
+      continue;
+    }
+    console.log("mark-batch-sent", { count: agencyTickets.length, agencyChatId, telegramMessageId: markSendResult.telegramMessageId });
+    totalSentToMark += agencyTickets.length;
+
+    await supabase.from("bot_responses").insert({
+      ticket_id: agencyTickets[0]?.id ?? null,
+      telegram_chat_id: agencyChatId,
+      telegram_message_id: markSendResult.telegramMessageId,
+      response_type: "batch_mark_summary",
+      response_text: markSummary
+    });
+
+    // Forward photos for this agency after the text summary.
+    // No client name in caption — employees match the photo to the right bullet in the summary.
+    for (const photo of agencyPhotos) {
+      try {
+        const categoryLabel = photo.category === "Deposits" ? "Deposit screenshot" : `${photo.category} screenshot`;
+        const caption = photo.requestSummary ? `📸 ${categoryLabel} — ${photo.requestSummary}` : `📸 ${categoryLabel}`;
+        await maybeSendTelegramPhoto({ chatId: agencyChatId, fileId: photo.fileId, caption, source: "telegram_batch" });
+        console.log("photo-forwarded-to-mark", { category: photo.category, agencyChatId });
+      } catch (err) {
+        console.error("photo-forward-failed", { error: err instanceof Error ? err.message : "unknown" });
+      }
+    }
+
+    // Send deposit link follow-ups for this agency — blockchain URLs that arrived in a
+    // separate batch after the original deposit message was already forwarded to Mark.
+    for (const update of agencyDepositUpdates) {
       try {
         const updateText = `🔗 Deposit link received — ${escapeTelegramHtml(update.chatTitle)}\n${update.url}`;
-        await maybeSendTelegramMessage({ chatId: markGroupChatId, text: updateText, source: "telegram_batch" });
-        console.log("deposit-link-update-sent-to-mark", { ticketId: update.ticketId });
+        await maybeSendTelegramMessage({ chatId: agencyChatId, text: updateText, source: "telegram_batch" });
+        console.log("deposit-link-update-sent-to-mark", { ticketId: update.ticketId, agencyChatId });
       } catch (err) {
         console.error("deposit-link-update-failed", { error: err instanceof Error ? err.message : "unknown" });
       }
     }
-    return NextResponse.json({ ok: true, count: 0, depositLinkUpdatesSent: depositLinkUpdates.length });
-  }
 
-  console.log("mark-batch-ready", { count: tickets.length });
-
-  // Send the combined batch summary to Mark's group (one message with all requests grouped
-  // by category — exactly as before). The Telegram message_id is stored as internal_message_id
-  // on every ticket in this batch so the webhook can look them all up when an employee replies.
-  const markSummary = buildMarkSummary(tickets);
-  const markSendResult = await maybeSendTelegramMessage({ chatId: markGroupChatId, text: markSummary, source: "telegram_batch" });
-  if (!markSendResult.sent || !markSendResult.telegramMessageId) {
-    throw new Error(markSendResult.reason ?? "Mark batch summary was not sent.");
-  }
-  console.log("mark-batch-sent", { count: tickets.length, telegramMessageId: markSendResult.telegramMessageId });
-
-  await supabase.from("bot_responses").insert({
-    ticket_id: tickets[0]?.id ?? null,
-    telegram_chat_id: markGroupChatId,
-    telegram_message_id: markSendResult.telegramMessageId,
-    response_type: "batch_mark_summary",
-    response_text: markSummary
-  });
-
-  // Forward all client photos to Mark as follow-up messages after the text summary.
-  // Caption format: "📸 Deposit screenshot — sent 30K"
-  //                 "📸 General screenshot — site is down"
-  // No client name — employees match the photo to the right bullet in the summary above
-  // by reading the request description in the caption.
-  for (const photo of photoForwards) {
-    try {
-      const categoryLabel = photo.category === "Deposits"
-        ? "Deposit screenshot"
-        : `${photo.category} screenshot`;
-      const caption = photo.requestSummary
-        ? `📸 ${categoryLabel} — ${photo.requestSummary}`
-        : `📸 ${categoryLabel}`;
-      await maybeSendTelegramPhoto({ chatId: markGroupChatId, fileId: photo.fileId, caption, source: "telegram_batch" });
-      console.log("photo-forwarded-to-mark", { category: photo.category, hasSummary: Boolean(photo.requestSummary) });
-    } catch (err) {
-      console.error("photo-forward-failed", { error: err instanceof Error ? err.message : "unknown" });
+    // Stamp every ticket for this agency with their summary's Telegram message_id.
+    // The webhook uses this per-agency ID to find all tickets when an employee replies.
+    for (const ticket of agencyTickets) {
+      const { data: processedTicket, error: updateError } = await supabase
+        .from("tickets")
+        .update({ internal_message_id: markSendResult.telegramMessageId, updated_at: new Date().toISOString() })
+        .eq("id", ticket.id)
+        .is("internal_message_id", null)
+        .select("id");
+      if (updateError) {
+        console.error("supabase-update-error", { table: "tickets", ticketId: ticket.id, message: updateError.message });
+        continue;
+      }
+      if (!processedTicket || processedTicket.length === 0) {
+        console.log("duplicate-batch-prevented", { ticketId: ticket.id });
+        continue;
+      }
+      console.log("mark-batch-request-marked-sent", { ticketId: ticket.id });
     }
   }
 
-  // Send deposit link follow-ups to Mark — these are blockchain URLs that arrived in a
-  // separate batch after the original "sent X amount" was already forwarded to Mark.
-  // Sending them as standalone messages keeps the deposit trail complete without creating
-  // a confusing duplicate deposit entry in the main summary.
-  for (const update of depositLinkUpdates) {
-    try {
-      const updateText = `🔗 Deposit link received — ${escapeTelegramHtml(update.chatTitle)}\n${update.url}`;
-      await maybeSendTelegramMessage({ chatId: markGroupChatId, text: updateText, source: "telegram_batch" });
-      console.log("deposit-link-update-sent-to-mark", { ticketId: update.ticketId });
-    } catch (err) {
-      console.error("deposit-link-update-failed", { error: err instanceof Error ? err.message : "unknown" });
-    }
-  }
-
-  // Client replies are driven ONLY by tickets created in THIS batch run.
-  // Old pending tickets (internal_message_id still null from a previous failed batch) were
-  // already replied to in their own batch — including them here would send a second reply
-  // hours later, and worse, a stuck deposit ticket could override a fresh site-issue reply.
+  // ── Client replies (agency-independent — sent directly to each client chat) ─────
+  // Driven ONLY by tickets created in THIS batch run. Old pending tickets were already
+  // replied to in their own batch — re-sending would spam the client.
   const ticketsByClient = new Map<string, BatchTicket[]>();
   for (const ticket of createdTickets) {
     if (!ticket.client_chat_id || ticket.holding_message_id) continue;
@@ -1346,11 +1428,10 @@ async function handleBatch(request: Request) {
     ticketsByClient.set(key, [...(ticketsByClient.get(key) ?? []), ticket]);
   }
 
-  // Chats where every message was a duplicate (no new ticket created) still need a reply
-  // so the client doesn't feel ignored. Synthesise a minimal ticket-like entry per duplicate
-  // chat so it enters the reply loop — only if the chat doesn't already have a real ticket entry.
+  // Chats where every message was a duplicate still need a reply so the client isn't left waiting.
+  // Synthesise a minimal ticket-like entry per duplicate chat so it enters the reply loop.
   for (const [dupChatId, intents] of chatDuplicateIntents.entries()) {
-    if (ticketsByClient.has(dupChatId)) continue; // real ticket already covers this chat
+    if (ticketsByClient.has(dupChatId)) continue;
     ticketsByClient.set(dupChatId, intents.map((intent, i) => ({
       id: `dup-${dupChatId}-${i}`,
       intent,
@@ -1372,7 +1453,6 @@ async function handleBatch(request: Request) {
       clientReplyCount += 1;
 
       // Synthetic duplicate-only tickets have ids like "dup-chatId-0" — not real DB rows.
-      // Filter them out before any Supabase write to avoid UUID validation errors.
       const realTickets = clientTickets.filter((t) => !t.id.startsWith("dup-"));
       const firstRealId = realTickets[0]?.id ?? null;
 
@@ -1400,32 +1480,11 @@ async function handleBatch(request: Request) {
     }
   }
 
-  // Stamp every ticket in this batch with the combined summary's Telegram message_id.
-  // The webhook uses this shared ID to find all tickets when an employee replies to the summary.
-  for (const ticket of tickets) {
-    const { data: processedTicket, error: updateError } = await supabase
-      .from("tickets")
-      .update({ internal_message_id: markSendResult.telegramMessageId, updated_at: new Date().toISOString() })
-      .eq("id", ticket.id)
-      .is("internal_message_id", null)
-      .select("id");
-    if (updateError) {
-      console.error("supabase-update-error", { table: "tickets", ticketId: ticket.id, message: updateError.message });
-      continue;
-    }
-    if (!processedTicket || processedTicket.length === 0) {
-      console.log("duplicate-batch-prevented", { ticketId: ticket.id });
-      continue;
-    }
-    console.log("mark-batch-request-marked-sent", { ticketId: ticket.id });
-  }
-
   return NextResponse.json({
     ok: true,
-    count: tickets.length,
+    count: totalSentToMark,
+    agencies: activeAgencies.size,
     clientGroups: clientReplyCount,
-    // Expose per-chat errors so they're visible in the Vercel function response
-    // without needing to dig through server logs.
     chatErrors: chatErrors.length > 0 ? chatErrors : undefined
   });
 }

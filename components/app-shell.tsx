@@ -1,6 +1,6 @@
 "use client";
 
-import { BookOpen, FlaskConical, Gauge, Inbox, Library, Settings } from "lucide-react";
+import { BookOpen, FlaskConical, Gauge, Inbox, Library, Settings, GitBranch } from "lucide-react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { useEffect, useState } from "react";
@@ -12,6 +12,7 @@ const navItems = [
   { href: "/knowledge-base", label: "Knowledge Base", icon: BookOpen },
   { href: "/test-lab", label: "Bot Test Lab", icon: FlaskConical },
   { href: "/intents", label: "Intent Library", icon: Library },
+  { href: "/routing", label: "Routing", icon: GitBranch },
   { href: "/settings", label: "Settings", icon: Settings }
 ];
 

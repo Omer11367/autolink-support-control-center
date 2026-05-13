@@ -42,6 +42,35 @@ export type Database = {
         updated_at: string | null;
         closed_at: string | null;
       }>;
+      mark_groups: DbTable<{
+        id: string;
+        name: string;
+        telegram_chat_id: string;
+        created_at: string | null;
+      }, {
+        name: string;
+        telegram_chat_id: string;
+      }, {
+        name?: string;
+        telegram_chat_id?: string;
+      }>;
+      client_groups: DbTable<{
+        id: string;
+        telegram_chat_id: string;
+        group_name: string | null;
+        mark_group_id: string | null;
+        created_at: string | null;
+        updated_at: string | null;
+      }, {
+        telegram_chat_id: string;
+        group_name?: string | null;
+        mark_group_id?: string | null;
+        updated_at?: string | null;
+      }, {
+        group_name?: string | null;
+        mark_group_id?: string | null;
+        updated_at?: string | null;
+      }>;
       bot_responses: DbTable<{
         id: string;
         ticket_id: string | null;
