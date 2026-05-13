@@ -297,15 +297,25 @@ export async function POST(request: Request) {
 
     // Load all agency group chat IDs — mark_groups table, client_groups with group_type='agency',
     // and the legacy env var. Messages from any of these are employee replies, not client requests.
-    const [{ data: agencyGroupsData }, { data: agencyTypeGroups }] = await Promise.all([
+    // Also load master groups — the bot ignores all messages from master groups.
+    const [{ data: agencyGroupsData }, { data: agencyTypeGroups }, { data: masterGroupsData }] = await Promise.all([
       supabase.from("mark_groups").select("telegram_chat_id"),
-      supabase.from("client_groups").select("telegram_chat_id").eq("group_type", "agency")
+      supabase.from("client_groups").select("telegram_chat_id").eq("group_type", "agency"),
+      supabase.from("client_groups").select("telegram_chat_id").eq("group_type", "master")
     ]);
+    const masterChatIds = new Set<string>(
+      (masterGroupsData ?? []).map((mg) => String(mg.telegram_chat_id))
+    );
     const agencyChatIds = new Set<string>([
       ...(agencyGroupsData ?? []).map((ag) => String(ag.telegram_chat_id)),
       ...(agencyTypeGroups ?? []).map((ag) => String(ag.telegram_chat_id)),
       ...(markGroupChatId ? [markGroupChatId] : [])
     ]);
+
+    // Master groups: bot is silent — ignore everything, no employee reply handling.
+    if (masterChatIds.has(String(chatId))) {
+      return NextResponse.json({ ok: true, status: "master_group_ignored" });
+    }
 
     const update = (await request.json()) as TelegramUpdate;
     const message = update.message ?? update.edited_message ?? update.channel_post ?? update.edited_channel_post;

@@ -802,12 +802,18 @@ async function markChatBatchProcessed(
 
 type ChatError = { chatId: string; error: string };
 type DepositLinkUpdate = { chatTitle: string; url: string; ticketId: string; chatId: string };
+type DepositForward = {
+  clientChatId: string;
+  clientTitle: string;
+  originalMessage: string;
+  photoFileId: string | null;
+};
 
 async function createTicketsFromQueuedMessages(
   supabase: SupabaseAdminClient,
   messages: QueuedMessage[],
   routingMap: Map<string, string>  // clientChatId → agency Telegram chat ID; empty = process all
-): Promise<{ tickets: BatchTicket[]; photoForwards: PhotoForward[]; depositLinkUpdates: DepositLinkUpdate[]; chatErrors: ChatError[]; chatDuplicateIntents: Map<string, string[]> }> {
+): Promise<{ tickets: BatchTicket[]; photoForwards: PhotoForward[]; depositLinkUpdates: DepositLinkUpdate[]; chatErrors: ChatError[]; chatDuplicateIntents: Map<string, string[]>; depositForwards: DepositForward[] }> {
   const messagesByChat = new Map<string, QueuedMessage[]>();
   for (const message of messages) {
     if (!message.telegram_chat_id) continue;
@@ -818,6 +824,7 @@ async function createTicketsFromQueuedMessages(
   const createdTickets: BatchTicket[] = [];
   const allPhotoForwards: PhotoForward[] = [];
   const allDepositLinkUpdates: DepositLinkUpdate[] = [];
+  const allDepositForwards: DepositForward[] = [];
   const chatErrors: ChatError[] = [];
   const chatDuplicateIntents = new Map<string, string[]>();
   for (const [chatId, chatMessages] of messagesByChat.entries()) {
@@ -1083,7 +1090,18 @@ async function createTicketsFromQueuedMessages(
       if (classification.intent === "deposit_funds") {
         ticketsCreatedForChat++;
         chatDuplicateIntents.set(chatId, [...(chatDuplicateIntents.get(chatId) ?? []), "deposit_funds"]);
-        console.log("deposit-ack-no-mark-ticket", { chatId });
+        // Queue forward to master groups (sent after batch if a master group is configured).
+        // Check all messages in this deposit group for an attached proof-of-payment photo.
+        const depositPhotoFileId = group.messages
+          .map((msg) => extractPhotoFileId(msg.raw_payload))
+          .find((id) => id !== null) ?? null;
+        allDepositForwards.push({
+          clientChatId: chatId,
+          clientTitle: getChatTitle(latestMessage),
+          originalMessage: groupedText,
+          photoFileId: depositPhotoFileId
+        });
+        console.log("deposit-queued-for-master", { chatId, hasPhoto: Boolean(depositPhotoFileId) });
         continue;
       }
 
@@ -1232,7 +1250,7 @@ async function createTicketsFromQueuedMessages(
     }
   }
 
-  return { tickets: createdTickets, photoForwards: allPhotoForwards, depositLinkUpdates: allDepositLinkUpdates, chatErrors, chatDuplicateIntents };
+  return { tickets: createdTickets, photoForwards: allPhotoForwards, depositLinkUpdates: allDepositLinkUpdates, depositForwards: allDepositForwards, chatErrors, chatDuplicateIntents };
 }
 
 async function handleBatch(request: Request) {
@@ -1279,10 +1297,12 @@ async function handleBatch(request: Request) {
   // Build a set of all agency Telegram chat IDs so we can exclude their messages from
   // client processing. Sources: mark_groups table, client_groups with group_type='agency',
   // and the legacy MARK_GROUP_CHAT_ID env var.
-  const { data: agencyTypeGroups } = await supabase
-    .from("client_groups")
-    .select("telegram_chat_id")
-    .eq("group_type", "agency");
+  const [{ data: agencyTypeGroups }, { data: masterGroupsData }] = await Promise.all([
+    supabase.from("client_groups").select("telegram_chat_id").eq("group_type", "agency"),
+    supabase.from("client_groups").select("telegram_chat_id").eq("group_type", "master")
+  ]);
+  const masterChatIds = (masterGroupsData ?? []).map((mg) => String(mg.telegram_chat_id)).filter(Boolean);
+  const masterChatIdSet = new Set<string>(masterChatIds);
   const agencyChatIds = new Set<string>([
     ...Array.from(markGroupById.values()).map((mg) => String(mg.telegramChatId)),
     ...(agencyTypeGroups ?? []).map((ag) => String(ag.telegram_chat_id)),
@@ -1302,14 +1322,15 @@ async function handleBatch(request: Request) {
     .limit(500);
   if (queuedMessagesError) throw new Error(`Supabase queued messages query failed: ${queuedMessagesError.message}`);
 
-  // Filter out any messages that came from agency groups — those are employee messages
-  // (replies, greetings, etc.) that should never be processed as client requests.
-  const clientMessages = (queuedMessagesData ?? []).filter(
-    (msg) => !agencyChatIds.has(String((msg as { telegram_chat_id?: unknown }).telegram_chat_id ?? ""))
-  ) as unknown as QueuedMessage[];
+  // Filter out agency and master group messages — those are internal/operator groups,
+  // never client request sources.
+  const clientMessages = (queuedMessagesData ?? []).filter((msg) => {
+    const id = String((msg as { telegram_chat_id?: unknown }).telegram_chat_id ?? "");
+    return !agencyChatIds.has(id) && !masterChatIdSet.has(id);
+  }) as unknown as QueuedMessage[];
   console.log("agency-messages-filtered", { total: (queuedMessagesData ?? []).length, afterFilter: clientMessages.length });
 
-  const { tickets: createdTickets, photoForwards, depositLinkUpdates, chatErrors, chatDuplicateIntents } = await createTicketsFromQueuedMessages(supabase, clientMessages, clientRoutingMap);
+  const { tickets: createdTickets, photoForwards, depositLinkUpdates, depositForwards, chatErrors, chatDuplicateIntents } = await createTicketsFromQueuedMessages(supabase, clientMessages, clientRoutingMap);
   if (chatErrors.length > 0) {
     console.error("batch-had-chat-errors", { count: chatErrors.length, errors: chatErrors });
   }
@@ -1517,10 +1538,34 @@ async function handleBatch(request: Request) {
     }
   }
 
+  // ── Forward deposits to master group(s) ───────────────────────────────────────
+  // Master groups receive ALL deposit notifications: text, photos, blockchain links.
+  // Nothing else is forwarded here — only deposit_funds intent messages.
+  if (masterChatIds.length > 0 && depositForwards.length > 0) {
+    for (const masterChatId of masterChatIds) {
+      for (const fwd of depositForwards) {
+        try {
+          const header = `💰 <b>Deposit</b> · ${escapeTelegramHtml(fwd.clientTitle)}`;
+          const body = escapeTelegramHtml(fwd.originalMessage);
+          if (fwd.photoFileId) {
+            const caption = `${header}\n\n${body}`.slice(0, 1024);
+            await maybeSendTelegramPhoto({ chatId: masterChatId, fileId: fwd.photoFileId, caption, source: "telegram_batch" });
+          } else {
+            await maybeSendTelegramMessage({ chatId: masterChatId, text: `${header}\n\n${body}`, source: "telegram_batch" });
+          }
+          console.log("deposit-forwarded-to-master", { masterChatId, clientChatId: fwd.clientChatId, hasPhoto: Boolean(fwd.photoFileId) });
+        } catch (err) {
+          console.error("deposit-master-forward-failed", { error: err instanceof Error ? err.message : "unknown" });
+        }
+      }
+    }
+  }
+
   return NextResponse.json({
     ok: true,
     count: totalSentToMark,
     agencies: activeAgencies.size,
+    masterForwards: depositForwards.length,
     clientGroups: clientReplyCount,
     chatErrors: chatErrors.length > 0 ? chatErrors : undefined
   });

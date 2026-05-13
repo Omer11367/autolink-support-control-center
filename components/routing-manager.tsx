@@ -15,7 +15,7 @@ type KnownGroup = {
   telegram_chat_id: string;
   group_name: string;
   mark_group_id: string | null;
-  group_type: string | null; // 'client' | 'agency' | null
+  group_type: string | null; // 'client' | 'agency' | 'master' | null
   last_seen: string;
 };
 
@@ -40,6 +40,9 @@ function TypeBadge({ type }: { type: string | null }) {
   );
   if (type === "client") return (
     <span className="rounded-full border border-blue-500/30 bg-blue-500/10 px-2 py-0.5 text-xs font-semibold text-blue-300">Client</span>
+  );
+  if (type === "master") return (
+    <span className="rounded-full border border-purple-500/30 bg-purple-500/10 px-2 py-0.5 text-xs font-semibold text-purple-300">Master</span>
   );
   return (
     <span className="rounded-full border border-amber-500/30 bg-amber-500/10 px-2 py-0.5 text-xs font-semibold text-amber-300">Unclassified</span>
@@ -132,11 +135,12 @@ export function RoutingManager({ initialMarkGroups, initialKnownGroups }: Props)
   const unclassifiedCount = knownGroups.filter((g) => !g.group_type).length;
   const clientCount = knownGroups.filter((g) => g.group_type === "client").length;
   const agencyCount = knownGroups.filter((g) => g.group_type === "agency").length;
+  const masterCount = knownGroups.filter((g) => g.group_type === "master").length;
 
   return (
     <div className="space-y-6">
       {/* ── Summary strip ──────────────────────────────────────────────────── */}
-      <div className="grid grid-cols-3 gap-3">
+      <div className="grid grid-cols-4 gap-3">
         <div className="rounded-lg border border-border bg-card px-4 py-3 text-center">
           <p className="text-2xl font-bold">{agencyCount}</p>
           <p className="text-xs text-muted-foreground mt-0.5">Agencies</p>
@@ -144,6 +148,10 @@ export function RoutingManager({ initialMarkGroups, initialKnownGroups }: Props)
         <div className="rounded-lg border border-border bg-card px-4 py-3 text-center">
           <p className="text-2xl font-bold">{clientCount}</p>
           <p className="text-xs text-muted-foreground mt-0.5">Clients</p>
+        </div>
+        <div className="rounded-lg border border-purple-500/20 bg-purple-500/5 px-4 py-3 text-center">
+          <p className="text-2xl font-bold text-purple-300">{masterCount}</p>
+          <p className="text-xs text-muted-foreground mt-0.5">Master</p>
         </div>
         <div className="rounded-lg border border-amber-500/20 bg-amber-500/5 px-4 py-3 text-center">
           <p className="text-2xl font-bold text-amber-300">{unclassifiedCount}</p>
@@ -160,8 +168,7 @@ export function RoutingManager({ initialMarkGroups, initialKnownGroups }: Props)
               <h2 className="font-semibold">All Groups</h2>
             </div>
             <p className="text-xs text-muted-foreground mt-0.5">
-              Every group the bot has joined. Set each as <strong>Agency</strong> (receives request batches)
-              or <strong>Client</strong> (sends requests). Unclassified groups are completely ignored.
+              Every group the bot has joined. <strong>Agency</strong> receives request batches. <strong>Client</strong> sends requests. <strong>Master</strong> receives deposits only (photos, links, payment proofs). Unclassified groups are completely ignored.
             </p>
           </div>
           <div className="ml-auto flex items-center gap-2 shrink-0">
@@ -219,6 +226,7 @@ export function RoutingManager({ initialMarkGroups, initialKnownGroups }: Props)
                     <option value="">— Unclassified —</option>
                     <option value="agency">Agency</option>
                     <option value="client">Client</option>
+                    <option value="master">Master</option>
                   </Select>
 
                   {/* Agency assignment (only for client groups) */}

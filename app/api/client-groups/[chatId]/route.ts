@@ -35,8 +35,8 @@ export async function POST(
       {
         telegram_chat_id: chatId,
         group_name: body.groupName ?? null,
-        // Agency groups are not assigned to another agency
-        mark_group_id: body.groupType === "agency" ? null : (body.markGroupId ?? null),
+        // Agency and Master groups are not assigned to another agency
+        mark_group_id: (body.groupType === "agency" || body.groupType === "master") ? null : (body.markGroupId ?? null),
         group_type: body.groupType ?? null,
         updated_at: new Date().toISOString()
       },
