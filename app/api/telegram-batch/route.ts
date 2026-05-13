@@ -1093,7 +1093,7 @@ async function createTicketsFromQueuedMessages(
         // Queue forward to master groups (sent after batch if a master group is configured).
         // Check all messages in this deposit group for an attached proof-of-payment photo.
         const depositPhotoFileId = group.messages
-          .map((msg) => extractPhotoFileId(msg.raw_payload))
+          .map((msg) => getPhotoFileId(msg))
           .find((id) => id !== null) ?? null;
         allDepositForwards.push({
           clientChatId: chatId,
