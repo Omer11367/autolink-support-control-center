@@ -59,16 +59,19 @@ export type Database = {
         telegram_chat_id: string;
         group_name: string | null;
         mark_group_id: string | null;
+        group_type: string | null;
         created_at: string | null;
         updated_at: string | null;
       }, {
         telegram_chat_id: string;
         group_name?: string | null;
         mark_group_id?: string | null;
+        group_type?: string | null;
         updated_at?: string | null;
       }, {
         group_name?: string | null;
         mark_group_id?: string | null;
+        group_type?: string | null;
         updated_at?: string | null;
       }>;
       bot_responses: DbTable<{

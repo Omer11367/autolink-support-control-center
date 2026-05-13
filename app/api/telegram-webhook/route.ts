@@ -299,7 +299,7 @@ export async function POST(request: Request) {
     // and the legacy env var. Messages from any of these are employee replies, not client requests.
     const [{ data: agencyGroupsData }, { data: agencyTypeGroups }] = await Promise.all([
       supabase.from("mark_groups").select("telegram_chat_id"),
-      supabase.from("client_groups").select("telegram_chat_id").eq("group_type" as never, "agency" as never)
+      supabase.from("client_groups").select("telegram_chat_id").eq("group_type", "agency")
     ]);
     const agencyChatIds = new Set<string>([
       ...(agencyGroupsData ?? []).map((ag) => String(ag.telegram_chat_id)),
@@ -522,7 +522,7 @@ export async function POST(request: Request) {
       return NextResponse.json({ ok: true, status: "new_group_registered" });
     }
 
-    const groupType = (knownGroup as Record<string, unknown>).group_type as string | null;
+    const groupType = knownGroup.group_type ?? null;
     if (!groupType) {
       // Registered but not yet classified — completely silent.
       console.log("unclassified-group-ignored", { chatId });

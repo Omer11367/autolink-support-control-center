@@ -32,7 +32,7 @@ async function getInitialData() {
     telegram_chat_id: String(cg.telegram_chat_id),
     group_name: cg.group_name ?? String(cg.telegram_chat_id),
     mark_group_id: cg.mark_group_id ?? null,
-    group_type: (cg as Record<string, unknown>).group_type as string | null ?? null,
+    group_type: cg.group_type ?? null,
     last_seen: lastSeenMap.get(String(cg.telegram_chat_id)) ?? ""
   }));
 

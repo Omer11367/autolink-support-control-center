@@ -1264,7 +1264,7 @@ async function handleBatch(request: Request) {
   const { data: agencyTypeGroups } = await supabase
     .from("client_groups")
     .select("telegram_chat_id")
-    .eq("group_type" as never, "agency" as never);
+    .eq("group_type", "agency");
   const agencyChatIds = new Set<string>([
     ...Array.from(markGroupById.values()).map((mg) => String(mg.telegramChatId)),
     ...(agencyTypeGroups ?? []).map((ag) => String(ag.telegram_chat_id)),
