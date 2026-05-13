@@ -3,6 +3,22 @@ import { RoutingManager } from "@/components/routing-manager";
 
 export const dynamic = "force-dynamic";
 
+type RawPayload = {
+  message?: { chat?: { title?: string } };
+  edited_message?: { chat?: { title?: string } };
+  channel_post?: { chat?: { title?: string } };
+};
+
+function extractGroupName(rawPayload: unknown, fallback: string): string {
+  const payload = rawPayload as RawPayload | null;
+  return (
+    payload?.message?.chat?.title ??
+    payload?.edited_message?.chat?.title ??
+    payload?.channel_post?.chat?.title ??
+    fallback
+  );
+}
+
 async function getInitialData() {
   if (!hasSupabaseServerEnv()) {
     return { markGroups: [], knownGroups: [] };
@@ -15,30 +31,57 @@ async function getInitialData() {
       supabase.from("client_groups").select("*").order("created_at", { ascending: true }),
       supabase
         .from("messages")
-        .select("telegram_chat_id, created_at")
+        .select("telegram_chat_id, raw_payload, created_at")
         .not("telegram_chat_id", "is", null)
         .order("created_at", { ascending: false })
         .limit(5000)
     ]);
 
-  // Build last-seen map from messages
-  const lastSeenMap = new Map<string, string>();
+  // client_groups is authoritative for group_type and mark_group_id
+  const clientGroupsMap = new Map(
+    (clientGroupsData ?? []).map((cg) => [String(cg.telegram_chat_id), cg])
+  );
+
+  // Discover all groups from messages table (so groups that messaged before
+  // auto-registration was added still appear here)
+  const seen = new Map<string, {
+    telegram_chat_id: string;
+    group_name: string;
+    mark_group_id: string | null;
+    group_type: string | null;
+    last_seen: string;
+  }>();
+
   for (const msg of (messagesData ?? [])) {
-    const id = String(msg.telegram_chat_id ?? "");
-    if (id && !lastSeenMap.has(id)) lastSeenMap.set(id, msg.created_at ?? "");
+    const chatId = String(msg.telegram_chat_id ?? "");
+    if (!chatId || seen.has(chatId)) continue;
+    const cg = clientGroupsMap.get(chatId);
+    const groupName = cg?.group_name ?? extractGroupName(msg.raw_payload, chatId);
+    seen.set(chatId, {
+      telegram_chat_id: chatId,
+      group_name: groupName,
+      mark_group_id: cg?.mark_group_id ?? null,
+      group_type: cg?.group_type ?? null,
+      last_seen: msg.created_at ?? ""
+    });
   }
 
-  const knownGroups = (clientGroupsData ?? []).map((cg) => ({
-    telegram_chat_id: String(cg.telegram_chat_id),
-    group_name: cg.group_name ?? String(cg.telegram_chat_id),
-    mark_group_id: cg.mark_group_id ?? null,
-    group_type: cg.group_type ?? null,
-    last_seen: lastSeenMap.get(String(cg.telegram_chat_id)) ?? ""
-  }));
+  // Also include groups in client_groups that haven't sent any messages yet
+  for (const [chatId, cg] of clientGroupsMap.entries()) {
+    if (!seen.has(chatId)) {
+      seen.set(chatId, {
+        telegram_chat_id: chatId,
+        group_name: cg.group_name ?? chatId,
+        mark_group_id: cg.mark_group_id ?? null,
+        group_type: cg.group_type ?? null,
+        last_seen: ""
+      });
+    }
+  }
 
   return {
     markGroups: markGroupsData ?? [],
-    knownGroups
+    knownGroups: Array.from(seen.values())
   };
 }
 
