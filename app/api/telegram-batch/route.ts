@@ -1379,7 +1379,7 @@ async function handleBatch(request: Request) {
   // For every photo message whose caption is ambiguous ("please check", no text, etc.), ask
   // Gemini Vision whether the image is a payment proof. If yes, prepend "payment proof sent"
   // to message_text so the classifier routes it to master (deposit) instead of the agency.
-  const geminiKey = process.env.GEMINI_API_KEY;
+  const geminiKey = process.env.GEMINI_API_KEY_2;
   const botTokenForPhoto = firstEnv(["TELEGRAM_BOT_TOKEN"]) ?? "";
   if (geminiKey) {
     const photoEnrichPromises = clientMessages
