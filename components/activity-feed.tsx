@@ -142,7 +142,11 @@ export function ActivityFeed() {
     }
   };
 
-  useEffect(() => { void fetchData(); }, []); // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => {
+    void fetchData();
+    const interval = setInterval(() => { void fetchData(); }, 30_000);
+    return () => clearInterval(interval);
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   const clientOptions = useMemo(() => {
     const names = Array.from(new Set(items.map((i) => i.clientName))).sort();
