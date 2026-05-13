@@ -1258,7 +1258,14 @@ async function handleBatch(request: Request) {
     if (agency) clientRoutingMap.set(String(cg.telegram_chat_id), agency.telegramChatId);
   }
   const useMultiAgency = clientRoutingMap.size > 0;
-  console.log("routing-loaded", { useMultiAgency, agencyCount: markGroupById.size, assignedClients: clientRoutingMap.size });
+  // Build a set of all agency Telegram chat IDs so we can exclude their messages from
+  // client processing. Agency groups receive request batches — their own messages
+  // (employee replies, greetings, etc.) must never be treated as client requests.
+  const agencyChatIds = new Set<string>([
+    ...Array.from(markGroupById.values()).map((mg) => String(mg.telegramChatId)),
+    ...(markGroupChatId ? [markGroupChatId] : [])
+  ]);
+  console.log("routing-loaded", { useMultiAgency, agencyCount: markGroupById.size, assignedClients: clientRoutingMap.size, agencyChatIds: agencyChatIds.size });
 
   const batchCutoffIso = new Date(Date.now() - BATCH_DELAY_MINUTES * 60 * 1000).toISOString();
   const messageStartIso = new Date(Date.now() - MESSAGE_LOOKBACK_MINUTES * 60 * 1000).toISOString();
@@ -1272,7 +1279,14 @@ async function handleBatch(request: Request) {
     .limit(500);
   if (queuedMessagesError) throw new Error(`Supabase queued messages query failed: ${queuedMessagesError.message}`);
 
-  const { tickets: createdTickets, photoForwards, depositLinkUpdates, chatErrors, chatDuplicateIntents } = await createTicketsFromQueuedMessages(supabase, (queuedMessagesData ?? []) as unknown as QueuedMessage[], clientRoutingMap);
+  // Filter out any messages that came from agency groups — those are employee messages
+  // (replies, greetings, etc.) that should never be processed as client requests.
+  const clientMessages = (queuedMessagesData ?? []).filter(
+    (msg) => !agencyChatIds.has(String((msg as { telegram_chat_id?: unknown }).telegram_chat_id ?? ""))
+  ) as unknown as QueuedMessage[];
+  console.log("agency-messages-filtered", { total: (queuedMessagesData ?? []).length, afterFilter: clientMessages.length });
+
+  const { tickets: createdTickets, photoForwards, depositLinkUpdates, chatErrors, chatDuplicateIntents } = await createTicketsFromQueuedMessages(supabase, clientMessages, clientRoutingMap);
   if (chatErrors.length > 0) {
     console.error("batch-had-chat-errors", { count: chatErrors.length, errors: chatErrors });
   }

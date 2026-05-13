@@ -283,7 +283,8 @@ export async function GET() {
 
 export async function POST(request: Request) {
   try {
-    const markGroupChatId = requireEnv("MARK_GROUP_CHAT_ID or MARK_INTERNAL_CHAT_ID", ["MARK_GROUP_CHAT_ID", "MARK_INTERNAL_CHAT_ID"]);
+    // markGroupChatId is kept for backward compatibility — optional when DB routing is configured.
+    const markGroupChatId = firstEnv(["MARK_GROUP_CHAT_ID", "MARK_INTERNAL_CHAT_ID"]) ?? "";
     const supabaseUrl = requireEnv("NEXT_PUBLIC_SUPABASE_URL or SUPABASE_URL", ["NEXT_PUBLIC_SUPABASE_URL", "SUPABASE_URL"]);
     const serviceRoleKey = requireEnv("SERVICE_ROLE_KEY or SUPABASE_SERVICE_ROLE_KEY", ["SERVICE_ROLE_KEY", "SUPABASE_SERVICE_ROLE_KEY"]);
 
@@ -294,6 +295,14 @@ export async function POST(request: Request) {
       }
     });
 
+    // Load all agency group chat IDs from DB (mark_groups) + legacy env var.
+    // Messages from any agency group are handled as employee replies, not client requests.
+    const { data: agencyGroupsData } = await supabase.from("mark_groups").select("telegram_chat_id");
+    const agencyChatIds = new Set<string>([
+      ...(agencyGroupsData ?? []).map((ag) => String(ag.telegram_chat_id)),
+      ...(markGroupChatId ? [markGroupChatId] : [])
+    ]);
+
     const update = (await request.json()) as TelegramUpdate;
     const message = update.message ?? update.edited_message ?? update.channel_post ?? update.edited_channel_post;
 
@@ -303,8 +312,8 @@ export async function POST(request: Request) {
 
     const chatId = message.chat.id;
 
-    // ── Employee message from Mark's internal group ──────────────────────────────────────────────
-    // When an employee answers in Mark's group, the bot analyzes their text and forwards
+    // ── Employee message from an agency group (Mark / Momo / Bobo / etc.) ───────────────────────
+    // When an employee answers in any agency group, the bot analyzes their text and forwards
     // the relevant portion to the right client group(s).
     //
     // How routing works:
@@ -315,7 +324,7 @@ export async function POST(request: Request) {
     //  4. For multi-client batches, the message is split into sentences and each client only
     //     receives the sentences relevant to THEIR ticket category (smart extraction).
     //  5. Single-client batches receive the full employee message.
-    if (String(chatId) === String(markGroupChatId)) {
+    if (agencyChatIds.has(String(chatId))) {
       const employeeText = (message.text ?? message.caption ?? "").trim();
       if (!employeeText) {
         return NextResponse.json({ ok: true, ignored: "empty" });
@@ -338,7 +347,7 @@ export async function POST(request: Request) {
         const { data: latestSummary } = await supabase
           .from("bot_responses")
           .select("telegram_message_id")
-          .eq("telegram_chat_id", String(markGroupChatId))
+          .eq("telegram_chat_id", String(chatId))
           .eq("response_type", "batch_mark_summary")
           .gte("created_at", lookbackIso)
           .order("created_at", { ascending: false })
