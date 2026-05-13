@@ -325,7 +325,18 @@ const RULES: IntentRule[] = [
 ];
 
 const REACTION_ONLY = /^[\s\u{1F44D}\u2764\uFE0F\u2705\u{1F64F}]+$/u;
-const SIMPLE_ACK_ONLY = /^(?:ok|okay|thanks|thank you|ty|yes|no|wait|one sec|one second|sec|noted|got it|received|sure|alright|all good|greetings|greetings everyone|nice to meet you|nice to e-meet you|bueno)[.!\s]*$/i;
+
+// Matches any message that is purely an acknowledgement \u2014 including combinations like
+// "sure great", "ok thanks!", "noted, got it", "perfect thanks", etc.
+// Longer multi-word phrases must appear before their shorter prefixes so alternation is greedy.
+const ACK_TERMS = [
+  "thank you", "one second", "one sec", "all good", "got it", "no problem",
+  "sounds good", "sound good", "greetings everyone", "nice to e-meet you", "nice to meet you",
+  "okay", "thanks", "alright", "great", "perfect", "understood", "received",
+  "noted", "sure", "fine", "cool", "awesome", "good", "nice", "super", "wonderful",
+  "cheers", "roger", "copy", "wait", "bueno", "yep", "nope", "yes", "no", "ok", "ty", "np", "sec"
+].join("|");
+const SIMPLE_ACK_ONLY = new RegExp(`^(?:(?:${ACK_TERMS})[.,!?\\s]*)+ *$`, "i");
 
 const SAFE_HOLDING_RESPONSES = [
   "Got it, checking this now.",
@@ -651,7 +662,7 @@ function detectActions(message: string, intent: string, amount: string | null): 
     addAction(actions, accounts.length > 1 ? { type: "verify_account", accounts } : { type: "verify_account", account: accounts[0] });
   }
 
-  if (/\b(status|active|blocked|disabled|usable|can run ads)\b/i.test(message) && accounts.length > 0) {
+  if (/\b(status|active|blocked|disabled|banned|restricted|suspended|usable|can run ads)\b/i.test(message) && accounts.length > 0) {
     addAction(actions, accounts.length > 1 ? { type: "account_status_check", accounts } : { type: "account_status_check", account: accounts[0] });
   }
 

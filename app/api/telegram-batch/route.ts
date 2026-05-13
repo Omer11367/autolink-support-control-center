@@ -279,7 +279,9 @@ function getPhotoFileId(message: QueuedMessage): string | null {
 
 function extractEntityAfter(text: string, labels: string[]): string | null {
   const labelPattern = labels.map((label) => label.replace(/\s+/g, "\\s+")).join("|");
-  const match = text.match(new RegExp(`\\b(?:${labelPattern})\\b\\s*[:#-]?\\s*([A-Za-z0-9_-]+)`, "i"));
+  // Require at least one digit — account IDs are always numeric.
+  // This prevents plain words like "are", "is", "banned" from being captured as IDs.
+  const match = text.match(new RegExp(`\\b(?:${labelPattern})\\b\\s*[:#-]?\\s*([A-Za-z0-9_-]*\\d[A-Za-z0-9_-]*)`, "i"));
   return match?.[1] ?? null;
 }
 
@@ -378,8 +380,11 @@ function cleanTaskText(ticket: BatchTicket): string {
     if (/\b(campaigns?\s+stopped|campaigns?\s+paused|ads?\s+stopped|ads?\s+paused|not\s+running|not\s+delivering|not\s+spending|no\s+spend)\b/i.test(original)) {
       return account ? `campaigns stopped on account ${account}` : "campaigns stopped / not spending";
     }
-    if (account && /\b(disabled|restricted|blocked)\b/i.test(original)) return `account ${account} disabled`;
-    return account ? `account issue on account ${account}` : "account issue reported";
+    if (account && /\b(disabled|restricted|blocked|banned|suspended)\b/i.test(original)) return `account ${account} disabled/banned`;
+    if (account) return `account issue on account ${account}`;
+    // Fallback: pull the first 5+ digit number directly from the message text
+    const numFallback = original.match(/\b\d{5,}\b/)?.[0] ?? null;
+    return numFallback ? `account issue on account ${numFallback}` : "account issue reported";
   }
 
   if (category === "Replacement") {
