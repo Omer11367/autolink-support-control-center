@@ -5,19 +5,44 @@ export async function POST(
   request: Request,
   { params }: { params: { chatId: string } }
 ) {
-  const body = await request.json() as { markGroupId?: string | null; groupName?: string };
+  const body = await request.json() as {
+    markGroupId?: string | null;
+    groupName?: string | null;
+    groupType?: string | null;
+  };
   const supabase = createSupabaseAdminClient();
+  const chatId = params.chatId;
+
+  // When classifying as agency: ensure a mark_groups entry exists so the
+  // routing map (clientChatId → agency telegram_chat_id) resolves correctly.
+  if (body.groupType === "agency") {
+    const name = body.groupName ?? chatId;
+    const { data: existing } = await supabase
+      .from("mark_groups")
+      .select("id")
+      .eq("telegram_chat_id", chatId)
+      .maybeSingle();
+    if (!existing) {
+      await supabase.from("mark_groups").insert({ name, telegram_chat_id: chatId });
+    } else {
+      await supabase.from("mark_groups").update({ name }).eq("telegram_chat_id", chatId);
+    }
+  }
+
   const { error } = await supabase
     .from("client_groups")
     .upsert(
       {
-        telegram_chat_id: params.chatId,
+        telegram_chat_id: chatId,
         group_name: body.groupName ?? null,
-        mark_group_id: body.markGroupId ?? null,
+        // Agency groups are not assigned to another agency
+        mark_group_id: body.groupType === "agency" ? null : (body.markGroupId ?? null),
+        group_type: body.groupType ?? null,
         updated_at: new Date().toISOString()
       },
       { onConflict: "telegram_chat_id" }
     );
+
   if (error) return NextResponse.json({ error: error.message }, { status: 500 });
   return NextResponse.json({ ok: true });
 }

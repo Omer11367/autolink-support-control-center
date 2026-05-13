@@ -295,11 +295,15 @@ export async function POST(request: Request) {
       }
     });
 
-    // Load all agency group chat IDs from DB (mark_groups) + legacy env var.
-    // Messages from any agency group are handled as employee replies, not client requests.
-    const { data: agencyGroupsData } = await supabase.from("mark_groups").select("telegram_chat_id");
+    // Load all agency group chat IDs — mark_groups table, client_groups with group_type='agency',
+    // and the legacy env var. Messages from any of these are employee replies, not client requests.
+    const [{ data: agencyGroupsData }, { data: agencyTypeGroups }] = await Promise.all([
+      supabase.from("mark_groups").select("telegram_chat_id"),
+      supabase.from("client_groups").select("telegram_chat_id").eq("group_type" as never, "agency" as never)
+    ]);
     const agencyChatIds = new Set<string>([
       ...(agencyGroupsData ?? []).map((ag) => String(ag.telegram_chat_id)),
+      ...(agencyTypeGroups ?? []).map((ag) => String(ag.telegram_chat_id)),
       ...(markGroupChatId ? [markGroupChatId] : [])
     ]);
 
@@ -494,6 +498,40 @@ export async function POST(request: Request) {
       }
 
       return NextResponse.json({ ok: true, forwarded: forwardedTo.length, clients: forwardedTo });
+    }
+
+    // ── Auto-register unknown groups + silence unclassified ─────────────────────────────────────
+    // Every group the bot is added to gets registered in client_groups the first time it sends
+    // a message. Until the admin classifies it as "client" or "agency" in the Routing dashboard,
+    // the bot does absolutely nothing — no replies, no storage, completely silent.
+    const { data: knownGroup } = await supabase
+      .from("client_groups")
+      .select("group_type, group_name")
+      .eq("telegram_chat_id", String(chatId))
+      .maybeSingle();
+
+    const groupName = message.chat.title?.trim() ?? `Group ${chatId}`;
+
+    if (!knownGroup) {
+      // First message ever from this group — register it as unclassified.
+      await supabase.from("client_groups").upsert(
+        { telegram_chat_id: String(chatId), group_name: groupName, group_type: null, updated_at: new Date().toISOString() },
+        { onConflict: "telegram_chat_id" }
+      );
+      console.log("new-group-auto-registered", { chatId, groupName });
+      return NextResponse.json({ ok: true, status: "new_group_registered" });
+    }
+
+    const groupType = (knownGroup as Record<string, unknown>).group_type as string | null;
+    if (!groupType) {
+      // Registered but not yet classified — completely silent.
+      console.log("unclassified-group-ignored", { chatId });
+      return NextResponse.json({ ok: true, status: "unclassified_group_ignored" });
+    }
+
+    // Non-client groups (should have been caught by agencyChatIds above, but guard here too).
+    if (groupType !== "client") {
+      return NextResponse.json({ ok: true, ignored: "non_client_group" });
     }
 
     console.log("incoming-message-received", { chatId, messageId: message.message_id });

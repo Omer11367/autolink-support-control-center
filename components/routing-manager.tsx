@@ -1,8 +1,8 @@
 "use client";
 
 import { useState, useMemo } from "react";
-import { Plus, Trash2, Check, Loader2, Network } from "lucide-react";
-import { Button, SecondaryButton, Card, Input, Select } from "@/components/ui";
+import { Check, Loader2, Network, RefreshCw } from "lucide-react";
+import { Card, Input, Select } from "@/components/ui";
 
 type MarkGroup = {
   id: string;
@@ -11,16 +11,17 @@ type MarkGroup = {
   created_at: string | null;
 };
 
-type ClientGroup = {
+type KnownGroup = {
   telegram_chat_id: string;
   group_name: string;
   mark_group_id: string | null;
+  group_type: string | null; // 'client' | 'agency' | null
   last_seen: string;
 };
 
 type Props = {
   initialMarkGroups: MarkGroup[];
-  initialClientGroups: ClientGroup[];
+  initialKnownGroups: KnownGroup[];
 };
 
 function timeAgo(isoString: string): string {
@@ -33,219 +34,213 @@ function timeAgo(isoString: string): string {
   return `${Math.floor(hrs / 24)}d ago`;
 }
 
-export function RoutingManager({ initialMarkGroups, initialClientGroups }: Props) {
+function TypeBadge({ type }: { type: string | null }) {
+  if (type === "agency") return (
+    <span className="rounded-full border border-emerald-500/30 bg-emerald-500/10 px-2 py-0.5 text-xs font-semibold text-emerald-300">Agency</span>
+  );
+  if (type === "client") return (
+    <span className="rounded-full border border-blue-500/30 bg-blue-500/10 px-2 py-0.5 text-xs font-semibold text-blue-300">Client</span>
+  );
+  return (
+    <span className="rounded-full border border-amber-500/30 bg-amber-500/10 px-2 py-0.5 text-xs font-semibold text-amber-300">Unclassified</span>
+  );
+}
+
+export function RoutingManager({ initialMarkGroups, initialKnownGroups }: Props) {
   const [markGroups, setMarkGroups] = useState<MarkGroup[]>(initialMarkGroups);
-  const [clientGroups, setClientGroups] = useState<ClientGroup[]>(initialClientGroups);
+  const [knownGroups, setKnownGroups] = useState<KnownGroup[]>(initialKnownGroups);
   const [search, setSearch] = useState("");
+  const [savingGroups, setSavingGroups] = useState<Set<string>>(new Set());
+  const [savedGroups, setSavedGroups] = useState<Set<string>>(new Set());
+  const [refreshing, setRefreshing] = useState(false);
 
-  // Add mark group form
-  const [newName, setNewName] = useState("");
-  const [newChatId, setNewChatId] = useState("");
-  const [addingGroup, setAddingGroup] = useState(false);
-  const [addError, setAddError] = useState("");
-
-  // Per-client saving state
-  const [savingClients, setSavingClients] = useState<Set<string>>(new Set());
-  const [savedClients, setSavedClients] = useState<Set<string>>(new Set());
-
-  const filteredClients = useMemo(() => {
+  const filteredGroups = useMemo(() => {
     const q = search.toLowerCase().trim();
-    if (!q) return clientGroups;
-    return clientGroups.filter(
-      (cg) =>
-        cg.group_name.toLowerCase().includes(q) ||
-        cg.telegram_chat_id.includes(q)
+    if (!q) return knownGroups;
+    return knownGroups.filter(
+      (g) => g.group_name.toLowerCase().includes(q) || g.telegram_chat_id.includes(q)
     );
-  }, [clientGroups, search]);
+  }, [knownGroups, search]);
 
-  async function handleAddMarkGroup() {
-    setAddError("");
-    if (!newName.trim() || !newChatId.trim()) {
-      setAddError("Both name and Telegram Chat ID are required.");
-      return;
-    }
-    setAddingGroup(true);
-    try {
-      const res = await fetch("/api/mark-groups", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ name: newName.trim(), telegramChatId: newChatId.trim() })
-      });
-      const json = await res.json() as { markGroup?: MarkGroup; error?: string };
-      if (!res.ok || json.error) { setAddError(json.error ?? "Failed to add group."); return; }
-      if (json.markGroup) {
-        setMarkGroups((prev) => [...prev, json.markGroup!]);
-        setNewName("");
-        setNewChatId("");
-      }
-    } catch {
-      setAddError("Network error. Please try again.");
-    } finally {
-      setAddingGroup(false);
-    }
+  // Agencies derived from known groups (for the assignment dropdown)
+  const agencyGroups = useMemo(
+    () => knownGroups.filter((g) => g.group_type === "agency"),
+    [knownGroups]
+  );
+
+  function markSaving(chatId: string) {
+    setSavingGroups((prev) => new Set(prev).add(chatId));
+    setSavedGroups((prev) => { const s = new Set(prev); s.delete(chatId); return s; });
+  }
+  function markSaved(chatId: string) {
+    setSavingGroups((prev) => { const s = new Set(prev); s.delete(chatId); return s; });
+    setSavedGroups((prev) => new Set(prev).add(chatId));
+    setTimeout(() => setSavedGroups((prev) => { const s = new Set(prev); s.delete(chatId); return s; }), 2000);
+  }
+  function markError(chatId: string) {
+    setSavingGroups((prev) => { const s = new Set(prev); s.delete(chatId); return s; });
   }
 
-  async function handleDeleteMarkGroup(id: string) {
-    if (!confirm("Delete this agency group? All clients assigned to it will become unassigned.")) return;
-    const res = await fetch(`/api/mark-groups/${id}`, { method: "DELETE" });
-    if (res.ok) {
-      setMarkGroups((prev) => prev.filter((mg) => mg.id !== id));
-      setClientGroups((prev) =>
-        prev.map((cg) => cg.mark_group_id === id ? { ...cg, mark_group_id: null } : cg)
-      );
-    }
-  }
-
-  async function handleAssignClient(chatId: string, markGroupId: string | null, groupName: string) {
-    setSavingClients((prev) => new Set(prev).add(chatId));
-    setSavedClients((prev) => { const s = new Set(prev); s.delete(chatId); return s; });
+  async function saveGroup(chatId: string, patch: { groupType?: string | null; markGroupId?: string | null; groupName?: string }) {
+    markSaving(chatId);
     try {
+      const group = knownGroups.find((g) => g.telegram_chat_id === chatId);
       const res = await fetch(`/api/client-groups/${encodeURIComponent(chatId)}`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ markGroupId, groupName })
+        body: JSON.stringify({
+          groupName: patch.groupName ?? group?.group_name,
+          groupType: patch.groupType !== undefined ? patch.groupType : group?.group_type,
+          markGroupId: patch.markGroupId !== undefined ? patch.markGroupId : group?.mark_group_id
+        })
       });
-      if (res.ok) {
-        setClientGroups((prev) =>
-          prev.map((cg) => cg.telegram_chat_id === chatId ? { ...cg, mark_group_id: markGroupId } : cg)
-        );
-        setSavedClients((prev) => new Set(prev).add(chatId));
-        setTimeout(() => setSavedClients((prev) => { const s = new Set(prev); s.delete(chatId); return s; }), 2000);
+      if (!res.ok) { markError(chatId); return; }
+
+      // Update local state
+      setKnownGroups((prev) => prev.map((g) => {
+        if (g.telegram_chat_id !== chatId) return g;
+        return {
+          ...g,
+          group_type: patch.groupType !== undefined ? patch.groupType : g.group_type,
+          mark_group_id: patch.markGroupId !== undefined ? patch.markGroupId : g.mark_group_id
+        };
+      }));
+
+      // If newly classified as agency, refresh mark_groups list
+      if (patch.groupType === "agency") {
+        const { markGroups: fresh } = await fetch("/api/mark-groups").then((r) => r.json() as Promise<{ markGroups: MarkGroup[] }>);
+        if (fresh) setMarkGroups(fresh);
       }
-    } finally {
-      setSavingClients((prev) => { const s = new Set(prev); s.delete(chatId); return s; });
+
+      markSaved(chatId);
+    } catch {
+      markError(chatId);
     }
   }
 
-  const assignedCount = clientGroups.filter((cg) => cg.mark_group_id !== null).length;
+  async function handleRefresh() {
+    setRefreshing(true);
+    try {
+      const res = await fetch("/api/client-groups");
+      const json = await res.json() as { clientGroups?: KnownGroup[] };
+      if (json.clientGroups) setKnownGroups(json.clientGroups);
+    } finally {
+      setRefreshing(false);
+    }
+  }
+
+  const unclassifiedCount = knownGroups.filter((g) => !g.group_type).length;
+  const clientCount = knownGroups.filter((g) => g.group_type === "client").length;
+  const agencyCount = knownGroups.filter((g) => g.group_type === "agency").length;
 
   return (
     <div className="space-y-6">
-      {/* ── Mark Groups ──────────────────────────────────────────────────── */}
-      <Card>
-        <div className="mb-4 flex items-center gap-2">
-          <Network className="h-4 w-4 text-muted-foreground" />
-          <h2 className="font-semibold">Agency Groups</h2>
-          <span className="ml-auto text-xs text-muted-foreground">{markGroups.length} group{markGroups.length !== 1 ? "s" : ""}</span>
+      {/* ── Summary strip ──────────────────────────────────────────────────── */}
+      <div className="grid grid-cols-3 gap-3">
+        <div className="rounded-lg border border-border bg-card px-4 py-3 text-center">
+          <p className="text-2xl font-bold">{agencyCount}</p>
+          <p className="text-xs text-muted-foreground mt-0.5">Agencies</p>
         </div>
-
-        {markGroups.length > 0 && (
-          <div className="mb-4 divide-y divide-border rounded-md border border-border">
-            {markGroups.map((mg) => {
-              const clientCount = clientGroups.filter((cg) => cg.mark_group_id === mg.id).length;
-              return (
-                <div key={mg.id} className="flex items-center gap-3 px-4 py-3">
-                  <div className="flex-1 min-w-0">
-                    <p className="font-medium text-sm">{mg.name}</p>
-                    <p className="text-xs text-muted-foreground font-mono">{mg.telegram_chat_id}</p>
-                  </div>
-                  <span className="text-xs text-muted-foreground shrink-0">
-                    {clientCount} client{clientCount !== 1 ? "s" : ""}
-                  </span>
-                  <button
-                    onClick={() => handleDeleteMarkGroup(mg.id)}
-                    className="shrink-0 rounded p-1.5 text-muted-foreground hover:bg-red-500/10 hover:text-red-400 transition"
-                    title="Delete agency group"
-                  >
-                    <Trash2 className="h-4 w-4" />
-                  </button>
-                </div>
-              );
-            })}
-          </div>
-        )}
-
-        {/* Add new mark group */}
-        <div className="space-y-2">
-          <p className="text-xs font-medium text-muted-foreground uppercase tracking-wide">Add Agency Group</p>
-          <div className="flex flex-col gap-2 sm:flex-row">
-            <Input
-              placeholder="Agency name (e.g. Mark Agency)"
-              value={newName}
-              onChange={(e) => setNewName(e.target.value)}
-              onKeyDown={(e) => e.key === "Enter" && handleAddMarkGroup()}
-              className="flex-1"
-            />
-            <Input
-              placeholder="Telegram group chat ID (e.g. -1001234567890)"
-              value={newChatId}
-              onChange={(e) => setNewChatId(e.target.value)}
-              onKeyDown={(e) => e.key === "Enter" && handleAddMarkGroup()}
-              className="flex-1"
-            />
-            <Button onClick={handleAddMarkGroup} disabled={addingGroup} className="shrink-0">
-              {addingGroup ? <Loader2 className="h-4 w-4 animate-spin" /> : <Plus className="h-4 w-4" />}
-              Add
-            </Button>
-          </div>
-          {addError && <p className="text-xs text-red-400">{addError}</p>}
-          <p className="text-xs text-muted-foreground">
-            To find a Telegram group chat ID: add your bot to the group, send a message, then check
-            the <span className="font-mono">telegram_chat_id</span> column in the messages table.
-          </p>
+        <div className="rounded-lg border border-border bg-card px-4 py-3 text-center">
+          <p className="text-2xl font-bold">{clientCount}</p>
+          <p className="text-xs text-muted-foreground mt-0.5">Clients</p>
         </div>
-      </Card>
+        <div className="rounded-lg border border-amber-500/20 bg-amber-500/5 px-4 py-3 text-center">
+          <p className="text-2xl font-bold text-amber-300">{unclassifiedCount}</p>
+          <p className="text-xs text-muted-foreground mt-0.5">Unclassified</p>
+        </div>
+      </div>
 
-      {/* ── Client Groups ─────────────────────────────────────────────────── */}
+      {/* ── All groups ─────────────────────────────────────────────────────── */}
       <Card className="p-0">
-        <div className="flex items-center gap-3 px-4 py-4 border-b border-border">
+        <div className="flex items-start gap-3 px-4 py-4 border-b border-border">
           <div>
-            <h2 className="font-semibold">Client Groups</h2>
+            <div className="flex items-center gap-2">
+              <Network className="h-4 w-4 text-muted-foreground" />
+              <h2 className="font-semibold">All Groups</h2>
+            </div>
             <p className="text-xs text-muted-foreground mt-0.5">
-              {assignedCount} of {clientGroups.length} assigned
-              {markGroups.length === 0 && (
-                <span className="ml-2 text-amber-400">— add an agency group above first</span>
-              )}
+              Every group the bot has joined. Set each as <strong>Agency</strong> (receives request batches)
+              or <strong>Client</strong> (sends requests). Unclassified groups are completely ignored.
             </p>
           </div>
-          <div className="ml-auto w-64">
+          <div className="ml-auto flex items-center gap-2 shrink-0">
             <Input
-              placeholder="Search groups…"
+              placeholder="Search…"
               value={search}
               onChange={(e) => setSearch(e.target.value)}
+              className="w-48"
             />
+            <button
+              onClick={handleRefresh}
+              disabled={refreshing}
+              className="rounded-lg border border-border p-2 text-muted-foreground hover:bg-zinc-900 hover:text-zinc-100 transition"
+              title="Refresh group list"
+            >
+              <RefreshCw className={`h-4 w-4 ${refreshing ? "animate-spin" : ""}`} />
+            </button>
           </div>
         </div>
 
-        {filteredClients.length === 0 ? (
-          <div className="px-4 py-8 text-center text-sm text-muted-foreground">
-            {clientGroups.length === 0
-              ? "No client groups found yet. Once clients send messages through the bot, they appear here."
+        {filteredGroups.length === 0 ? (
+          <div className="px-4 py-10 text-center text-sm text-muted-foreground">
+            {knownGroups.length === 0
+              ? "No groups yet. Add the bot to a Telegram group — it will appear here automatically once someone sends a message."
               : "No groups match your search."}
           </div>
         ) : (
           <div className="divide-y divide-border">
-            {filteredClients.map((cg) => {
-              const isSaving = savingClients.has(cg.telegram_chat_id);
-              const isSaved = savedClients.has(cg.telegram_chat_id);
+            {filteredGroups.map((group) => {
+              const isSaving = savingGroups.has(group.telegram_chat_id);
+              const isSaved = savedGroups.has(group.telegram_chat_id);
               return (
-                <div key={cg.telegram_chat_id} className="flex items-center gap-3 px-4 py-3">
+                <div key={group.telegram_chat_id} className="flex flex-wrap items-center gap-3 px-4 py-3">
+                  {/* Group info */}
                   <div className="flex-1 min-w-0">
-                    <p className="text-sm font-medium truncate">{cg.group_name}</p>
-                    <p className="text-xs text-muted-foreground font-mono">{cg.telegram_chat_id}</p>
+                    <div className="flex items-center gap-2 flex-wrap">
+                      <p className="text-sm font-medium truncate">{group.group_name}</p>
+                      <TypeBadge type={group.group_type} />
+                    </div>
+                    <p className="text-xs text-muted-foreground font-mono">{group.telegram_chat_id}</p>
                   </div>
+
+                  {/* Last seen */}
                   <span className="text-xs text-muted-foreground shrink-0 hidden sm:block">
-                    {timeAgo(cg.last_seen)}
+                    {timeAgo(group.last_seen)}
                   </span>
-                  <div className="flex items-center gap-2 shrink-0">
+
+                  {/* Type selector */}
+                  <Select
+                    value={group.group_type ?? ""}
+                    onChange={(e) => saveGroup(group.telegram_chat_id, { groupType: e.target.value || null })}
+                    disabled={isSaving}
+                    className="w-36 text-xs shrink-0"
+                  >
+                    <option value="">— Unclassified —</option>
+                    <option value="agency">Agency</option>
+                    <option value="client">Client</option>
+                  </Select>
+
+                  {/* Agency assignment (only for client groups) */}
+                  {group.group_type === "client" && (
                     <Select
-                      value={cg.mark_group_id ?? ""}
-                      onChange={(e) => handleAssignClient(cg.telegram_chat_id, e.target.value || null, cg.group_name)}
+                      value={group.mark_group_id ?? ""}
+                      onChange={(e) => saveGroup(group.telegram_chat_id, { markGroupId: e.target.value || null })}
                       disabled={isSaving || markGroups.length === 0}
-                      className="w-44 text-xs"
+                      className="w-40 text-xs shrink-0"
                     >
-                      <option value="">— Not assigned (skip) —</option>
+                      <option value="">— No agency —</option>
                       {markGroups.map((mg) => (
-                        <option key={mg.id} value={mg.id}>
-                          {mg.name}
-                        </option>
+                        <option key={mg.id} value={mg.id}>{mg.name}</option>
                       ))}
                     </Select>
-                    <span className="w-5 shrink-0">
-                      {isSaving && <Loader2 className="h-4 w-4 animate-spin text-muted-foreground" />}
-                      {isSaved && !isSaving && <Check className="h-4 w-4 text-emerald-400" />}
-                    </span>
-                  </div>
+                  )}
+
+                  {/* Save indicator */}
+                  <span className="w-5 shrink-0">
+                    {isSaving && <Loader2 className="h-4 w-4 animate-spin text-muted-foreground" />}
+                    {isSaved && !isSaving && <Check className="h-4 w-4 text-emerald-400" />}
+                  </span>
                 </div>
               );
             })}
@@ -253,16 +248,16 @@ export function RoutingManager({ initialMarkGroups, initialClientGroups }: Props
         )}
       </Card>
 
-      <SecondaryButton
-        onClick={async () => {
-          const res = await fetch("/api/client-groups");
-          const json = await res.json() as { clientGroups?: ClientGroup[] };
-          if (json.clientGroups) setClientGroups(json.clientGroups);
-        }}
-        className="text-xs"
-      >
-        Refresh client list
-      </SecondaryButton>
+      {agencyCount === 0 && clientCount > 0 && (
+        <p className="text-xs text-amber-400">
+          ⚠️ You have client groups but no agency groups. Set at least one group as Agency so clients have somewhere to route requests.
+        </p>
+      )}
+      {clientCount > 0 && knownGroups.filter((g) => g.group_type === "client" && !g.mark_group_id).length > 0 && agencyCount > 0 && (
+        <p className="text-xs text-amber-400">
+          ⚠️ Some client groups have no agency assigned — their requests will be skipped.
+        </p>
+      )}
     </div>
   );
 }

@@ -1259,10 +1259,15 @@ async function handleBatch(request: Request) {
   }
   const useMultiAgency = clientRoutingMap.size > 0;
   // Build a set of all agency Telegram chat IDs so we can exclude their messages from
-  // client processing. Agency groups receive request batches — their own messages
-  // (employee replies, greetings, etc.) must never be treated as client requests.
+  // client processing. Sources: mark_groups table, client_groups with group_type='agency',
+  // and the legacy MARK_GROUP_CHAT_ID env var.
+  const { data: agencyTypeGroups } = await supabase
+    .from("client_groups")
+    .select("telegram_chat_id")
+    .eq("group_type" as never, "agency" as never);
   const agencyChatIds = new Set<string>([
     ...Array.from(markGroupById.values()).map((mg) => String(mg.telegramChatId)),
+    ...(agencyTypeGroups ?? []).map((ag) => String(ag.telegram_chat_id)),
     ...(markGroupChatId ? [markGroupChatId] : [])
   ]);
   console.log("routing-loaded", { useMultiAgency, agencyCount: markGroupById.size, assignedClients: clientRoutingMap.size, agencyChatIds: agencyChatIds.size });
