@@ -41,6 +41,7 @@ type TelegramMessage = {
     mime_type?: string;
     file_size?: number;
   };
+  new_chat_title?: string;
 };
 
 type TelegramChatMemberStatus = "creator" | "administrator" | "member" | "restricted" | "left" | "kicked";
@@ -337,15 +338,19 @@ export async function POST(request: Request) {
       if (isActiveInGroup && chat.id) {
         const chatId = String(chat.id);
         const groupName = chat.title?.trim() ?? `Group ${chatId}`;
-        const { error: upsertErr } = await supabase.from("client_groups").upsert(
-          { telegram_chat_id: chatId, group_name: groupName, group_type: null, updated_at: new Date().toISOString() },
+        const now = new Date().toISOString();
+        // Insert if new group (ignoreDuplicates: true preserves existing group_type for re-adds)
+        const { error: insertErr } = await supabase.from("client_groups").upsert(
+          { telegram_chat_id: chatId, group_name: groupName, group_type: null, updated_at: now },
           { onConflict: "telegram_chat_id", ignoreDuplicates: true }
         );
-        if (upsertErr) {
-          console.error("my-chat-member-group-register-failed", { chatId, groupName, error: upsertErr.message });
-        } else {
-          console.log("my-chat-member-group-registered", { chatId, groupName, status: new_chat_member.status });
-        }
+        if (insertErr) console.error("my-chat-member-insert-failed", { chatId, error: insertErr.message });
+        // Always sync the name (separate update so group_type is not touched)
+        const { error: nameErr } = await supabase.from("client_groups")
+          .update({ group_name: groupName, updated_at: now })
+          .eq("telegram_chat_id", chatId);
+        if (nameErr) console.error("my-chat-member-name-sync-failed", { chatId, error: nameErr.message });
+        console.log("my-chat-member-group-synced", { chatId, groupName, status: new_chat_member.status });
       }
       return NextResponse.json({ ok: true, status: "my_chat_member_handled" });
     }
@@ -558,6 +563,26 @@ export async function POST(request: Request) {
       .maybeSingle();
 
     const groupName = message.chat.title?.trim() ?? `Group ${chatId}`;
+
+    // Handle group rename service message — Telegram sends this when the group title changes.
+    if (message.new_chat_title) {
+      const newTitle = message.new_chat_title.trim();
+      if (knownGroup) {
+        await supabase.from("client_groups")
+          .update({ group_name: newTitle, updated_at: new Date().toISOString() })
+          .eq("telegram_chat_id", String(chatId));
+        console.log("group-renamed-via-service-msg", { chatId, newTitle });
+      }
+      return NextResponse.json({ ok: true, status: "group_name_updated" });
+    }
+
+    // Silently sync name if it drifted (fire-and-forget — never blocks message processing)
+    if (knownGroup && knownGroup.group_name !== groupName) {
+      supabase.from("client_groups")
+        .update({ group_name: groupName, updated_at: new Date().toISOString() })
+        .eq("telegram_chat_id", String(chatId))
+        .then(({ error }) => { if (error) console.error("group-name-drift-sync-failed", { chatId, error: error.message }); });
+    }
 
     if (!knownGroup) {
       // First message ever from this group — register it as unclassified.

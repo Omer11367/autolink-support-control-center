@@ -44,5 +44,13 @@ export async function POST(
     );
 
   if (error) return NextResponse.json({ error: error.message }, { status: 500 });
+
+  // Trigger an immediate batch so queued messages from this client are routed to the
+  // new agency right away instead of waiting up to 5 minutes for the next cron cycle.
+  const batchUrl = new URL("/api/telegram-batch", request.url);
+  fetch(batchUrl.toString(), { method: "POST" }).catch((e) => {
+    console.error("routing-change-batch-trigger-failed", { error: e instanceof Error ? e.message : "unknown" });
+  });
+
   return NextResponse.json({ ok: true });
 }
