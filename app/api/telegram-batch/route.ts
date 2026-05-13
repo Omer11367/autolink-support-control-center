@@ -1097,7 +1097,7 @@ async function createTicketsFromQueuedMessages(
           .find((id) => id !== null) ?? null;
         allDepositForwards.push({
           clientChatId: chatId,
-          clientTitle: getChatTitle(latestMessage),
+          clientTitle: getChatTitle(group.messages[group.messages.length - 1] ?? sortedUnprocessed[sortedUnprocessed.length - 1]!),
           originalMessage: groupedText,
           photoFileId: depositPhotoFileId
         });
