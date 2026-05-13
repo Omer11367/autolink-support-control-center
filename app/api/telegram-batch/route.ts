@@ -809,6 +809,45 @@ type DepositForward = {
   photoFileId: string | null;
 };
 
+// ── Gemini vision: analyze a photo and return "payment proof" or "" ─────────────────────────────
+// Called before batch classification so that a receipt photo with "please check" caption is
+// correctly routed to master instead of landing in General Questions at the agency.
+async function analyzePhotoWithGemini(fileId: string, botToken: string, geminiKey: string): Promise<string> {
+  try {
+    const fileRes = await fetch(`https://api.telegram.org/bot${botToken}/getFile?file_id=${encodeURIComponent(fileId)}`);
+    const fileData = await fileRes.json() as { ok: boolean; result?: { file_path: string } };
+    if (!fileData.ok || !fileData.result?.file_path) return "";
+
+    const imgRes = await fetch(`https://api.telegram.org/file/bot${botToken}/${fileData.result.file_path}`);
+    if (!imgRes.ok) return "";
+    const mimeType = imgRes.headers.get("content-type") ?? "image/jpeg";
+    const base64 = Buffer.from(await imgRes.arrayBuffer()).toString("base64");
+
+    const geminiRes = await fetch(
+      `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${geminiKey}`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          contents: [{
+            parts: [
+              { inline_data: { mime_type: mimeType, data: base64 } },
+              { text: "Is this image a payment receipt, proof of payment, money transfer confirmation, or crypto/blockchain transaction screenshot? Reply with exactly one word: 'yes' or 'no'." }
+            ]
+          }]
+        })
+      }
+    );
+    const geminiData = await geminiRes.json() as { candidates?: Array<{ content?: { parts?: Array<{ text: string }> } }> };
+    const answer = geminiData.candidates?.[0]?.content?.parts?.[0]?.text?.trim().toLowerCase() ?? "";
+    console.log("gemini-photo-result", { fileId, answer });
+    return answer.startsWith("yes") ? "payment proof sent" : "";
+  } catch (e) {
+    console.error("gemini-photo-analysis-failed", { error: e instanceof Error ? e.message : "unknown" });
+    return "";
+  }
+}
+
 async function createTicketsFromQueuedMessages(
   supabase: SupabaseAdminClient,
   messages: QueuedMessage[],
@@ -976,10 +1015,16 @@ async function createTicketsFromQueuedMessages(
       const lastGroup = messageGroups[messageGroups.length - 1];
       // URL-only messages (Etherscan links etc.) belong to whatever came before them.
       const effectiveCategory = (lastGroup && isUrlOnlyText(item.text)) ? lastGroup.category : item.category;
+      // Messages sent within 3 minutes of each other are almost certainly about the same issue
+      // (e.g. "your site is down?" then "cant seem to log in" as two separate messages).
+      // Merge them regardless of intent difference so only one ticket is created.
+      const lastMsgTime = lastGroup?.messages.at(-1)?.created_at ? new Date(lastGroup.messages.at(-1)!.created_at!).getTime() : 0;
+      const currMsgTime = item.message.created_at ? new Date(item.message.created_at).getTime() : 0;
+      const sentWithinWindow = lastMsgTime > 0 && currMsgTime > 0 && (currMsgTime - lastMsgTime) < 3 * 60 * 1000;
       const sameGroup = lastGroup && lastGroup.category === effectiveCategory
         // For General, also require the same intent so different questions (site-down vs monthly
-        // report) get separate tickets — and therefore a proper combined neutral client reply.
-        && (effectiveCategory !== "General" || lastGroup.intent === item.intent);
+        // report) get separate tickets — unless they were sent within 3 min (same burst = same issue).
+        && (effectiveCategory !== "General" || lastGroup.intent === item.intent || sentWithinWindow);
       if (sameGroup) {
         lastGroup.texts.push(item.text);
         lastGroup.messages.push(item.message);
@@ -1329,6 +1374,33 @@ async function handleBatch(request: Request) {
     return !agencyChatIds.has(id) && !masterChatIdSet.has(id);
   }) as unknown as QueuedMessage[];
   console.log("agency-messages-filtered", { total: (queuedMessagesData ?? []).length, afterFilter: clientMessages.length });
+
+  // ── Gemini photo enrichment ───────────────────────────────────────────────────────────────────
+  // For every photo message whose caption is ambiguous ("please check", no text, etc.), ask
+  // Gemini Vision whether the image is a payment proof. If yes, prepend "payment proof sent"
+  // to message_text so the classifier routes it to master (deposit) instead of the agency.
+  const geminiKey = process.env.GEMINI_API_KEY;
+  const botTokenForPhoto = firstEnv(["TELEGRAM_BOT_TOKEN"]) ?? "";
+  if (geminiKey) {
+    const photoEnrichPromises = clientMessages
+      .filter((msg) => {
+        const fileId = getPhotoFileId(msg as unknown as QueuedMessage);
+        if (!fileId) return false;
+        const caption = (msg as unknown as QueuedMessage).message_text ?? "";
+        // Skip if caption already has clear deposit signals — no need to call Gemini
+        const alreadyClear = /\b(sent|paid|deposit|payment\s*proof|transferred|transfer)\b/i.test(caption);
+        return !alreadyClear;
+      })
+      .map(async (msg) => {
+        const fileId = getPhotoFileId(msg as unknown as QueuedMessage)!;
+        const description = await analyzePhotoWithGemini(fileId, botTokenForPhoto, geminiKey);
+        if (description) {
+          const existing = (msg as unknown as QueuedMessage).message_text ?? "";
+          (msg as unknown as { message_text: string }).message_text = description + (existing ? ` ${existing}` : "");
+        }
+      });
+    await Promise.all(photoEnrichPromises);
+  }
 
   const { tickets: createdTickets, photoForwards, depositLinkUpdates, depositForwards, chatErrors, chatDuplicateIntents } = await createTicketsFromQueuedMessages(supabase, clientMessages, clientRoutingMap);
   if (chatErrors.length > 0) {
