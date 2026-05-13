@@ -43,21 +43,21 @@ export async function POST(request: Request) {
   const markGroupChatId = firstEnv(["MARK_GROUP_CHAT_ID", "MARK_INTERNAL_CHAT_ID"]) ?? "";
 
   let text = "";
-  let photoFile: File | null = null;
+  let attachedFile: File | null = null;
 
   const contentType = request.headers.get("content-type") ?? "";
   if (contentType.includes("multipart/form-data")) {
     const form = await request.formData();
     text = (form.get("text") as string | null)?.trim() ?? "";
-    photoFile = (form.get("photo") as File | null) ?? null;
-    if (photoFile && photoFile.size === 0) photoFile = null;
+    attachedFile = (form.get("file") as File | null) ?? null;
+    if (attachedFile && attachedFile.size === 0) attachedFile = null;
   } else {
     const body = (await request.json()) as { text?: string };
     text = body.text?.trim() ?? "";
   }
 
-  if (!text && !photoFile) {
-    return NextResponse.json({ error: "Provide at least a message or a photo." }, { status: 400 });
+  if (!text && !attachedFile) {
+    return NextResponse.json({ error: "Provide at least a message or a file." }, { status: 400 });
   }
 
   // Fetch only groups explicitly classified as 'client' in the routing dashboard.
@@ -81,14 +81,16 @@ export async function POST(request: Request) {
     return NextResponse.json({ sent: 0, failed: 0, total: 0, results: [] });
   }
 
-  // Convert photo file to ArrayBuffer once (reused per chat).
-  let photoBuffer: ArrayBuffer | null = null;
-  let photoName = "photo.jpg";
-  let photoMimeType = "image/jpeg";
-  if (photoFile) {
-    photoBuffer = await photoFile.arrayBuffer();
-    photoName = photoFile.name || "photo.jpg";
-    photoMimeType = photoFile.type || "image/jpeg";
+  // Read the file buffer once — reused for every chat (can't re-read a stream).
+  let fileBuffer: ArrayBuffer | null = null;
+  let fileName = "file";
+  let fileMimeType = "application/octet-stream";
+  let isImage = false;
+  if (attachedFile) {
+    fileBuffer = await attachedFile.arrayBuffer();
+    fileName = attachedFile.name || "file";
+    fileMimeType = attachedFile.type || "application/octet-stream";
+    isImage = fileMimeType.startsWith("image/");
   }
 
   const results: Array<{ chatId: string; success: boolean; error?: string }> = [];
@@ -97,29 +99,28 @@ export async function POST(request: Request) {
     try {
       let res: Response;
 
-      if (photoBuffer) {
-        // Send photo — recreate FormData each time (can't reuse a sent FormData).
+      if (fileBuffer && isImage) {
+        // Image → sendPhoto (shows inline in Telegram)
         const tgForm = new FormData();
         tgForm.set("chat_id", chatId);
-        tgForm.set("photo", new Blob([photoBuffer], { type: photoMimeType }), photoName);
-        if (text) {
-          tgForm.set("caption", text);
-          tgForm.set("parse_mode", "HTML");
-        }
-        res = await fetch(`https://api.telegram.org/bot${token}/sendPhoto`, {
-          method: "POST",
-          body: tgForm
-        });
+        tgForm.set("photo", new Blob([fileBuffer], { type: fileMimeType }), fileName);
+        if (text) { tgForm.set("caption", text); tgForm.set("parse_mode", "HTML"); }
+        res = await fetch(`https://api.telegram.org/bot${token}/sendPhoto`, { method: "POST", body: tgForm });
+
+      } else if (fileBuffer) {
+        // Non-image file → sendDocument (PDF, doc, etc.)
+        const tgForm = new FormData();
+        tgForm.set("chat_id", chatId);
+        tgForm.set("document", new Blob([fileBuffer], { type: fileMimeType }), fileName);
+        if (text) { tgForm.set("caption", text); tgForm.set("parse_mode", "HTML"); }
+        res = await fetch(`https://api.telegram.org/bot${token}/sendDocument`, { method: "POST", body: tgForm });
+
       } else {
+        // Text only
         res = await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            chat_id: chatId,
-            text,
-            parse_mode: "HTML",
-            disable_web_page_preview: false
-          })
+          body: JSON.stringify({ chat_id: chatId, text, parse_mode: "HTML", disable_web_page_preview: false })
         });
       }
 

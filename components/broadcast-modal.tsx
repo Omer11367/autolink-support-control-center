@@ -12,25 +12,26 @@ type SendState =
 export function BroadcastModal() {
   const [open, setOpen] = useState(false);
   const [text, setText] = useState("");
-  const [photoFile, setPhotoFile] = useState<File | null>(null);
-  const [photoPreview, setPhotoPreview] = useState<string | null>(null);
+  const [attachedFile, setAttachedFile] = useState<File | null>(null);
+  const [imagePreview, setImagePreview] = useState<string | null>(null);
   const [sendState, setSendState] = useState<SendState>({ status: "idle" });
   const fileInputRef = useRef<HTMLInputElement>(null);
 
+  const isImage = attachedFile ? attachedFile.type.startsWith("image/") : false;
+
   function handleFileChange(e: React.ChangeEvent<HTMLInputElement>) {
     const file = e.target.files?.[0] ?? null;
-    setPhotoFile(file);
-    if (file) {
-      const url = URL.createObjectURL(file);
-      setPhotoPreview(url);
+    setAttachedFile(file);
+    if (file && file.type.startsWith("image/")) {
+      setImagePreview(URL.createObjectURL(file));
     } else {
-      setPhotoPreview(null);
+      setImagePreview(null);
     }
   }
 
-  function removePhoto() {
-    setPhotoFile(null);
-    setPhotoPreview(null);
+  function removeFile() {
+    setAttachedFile(null);
+    setImagePreview(null);
     if (fileInputRef.current) fileInputRef.current.value = "";
   }
 
@@ -38,18 +39,18 @@ export function BroadcastModal() {
     if (sendState.status === "sending") return;
     setOpen(false);
     setText("");
-    removePhoto();
+    removeFile();
     setSendState({ status: "idle" });
   }
 
   async function handleSend() {
-    if (!text.trim() && !photoFile) return;
+    if (!text.trim() && !attachedFile) return;
     setSendState({ status: "sending" });
 
     try {
       const form = new FormData();
       if (text.trim()) form.set("text", text.trim());
-      if (photoFile) form.set("photo", photoFile);
+      if (attachedFile) form.set("file", attachedFile);
 
       const res = await fetch("/api/broadcast", { method: "POST", body: form });
       const data = (await res.json()) as { sent?: number; failed?: number; total?: number; error?: string };
@@ -65,7 +66,7 @@ export function BroadcastModal() {
     }
   }
 
-  const canSend = (text.trim().length > 0 || photoFile !== null) && sendState.status !== "sending";
+  const canSend = (text.trim().length > 0 || attachedFile !== null) && sendState.status !== "sending";
 
   return (
     <>
@@ -125,27 +126,38 @@ export function BroadcastModal() {
                 />
               </div>
 
-              {/* Photo attachment */}
+              {/* File / Photo attachment */}
               <div>
                 <label className="mb-1.5 block text-xs font-medium text-zinc-400">
-                  Photo <span className="text-zinc-600">(optional)</span>
+                  Photo or File <span className="text-zinc-600">(optional — image, PDF, doc, etc.)</span>
                 </label>
 
-                {photoPreview ? (
-                  <div className="relative inline-block">
-                    {/* eslint-disable-next-line @next/next/no-img-element */}
-                    <img
-                      src={photoPreview}
-                      alt="Attached photo"
-                      className="max-h-48 rounded-lg border border-border object-contain"
-                    />
+                {attachedFile ? (
+                  <div className="flex items-center gap-3 rounded-lg border border-border bg-zinc-950 px-4 py-3">
+                    {isImage && imagePreview ? (
+                      /* Image preview */
+                      // eslint-disable-next-line @next/next/no-img-element
+                      <img src={imagePreview} alt="Preview" className="h-12 w-12 rounded object-cover flex-shrink-0" />
+                    ) : (
+                      /* Generic file icon */
+                      <div className="flex h-12 w-12 flex-shrink-0 items-center justify-center rounded bg-zinc-800 text-zinc-400">
+                        <svg xmlns="http://www.w3.org/2000/svg" width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                          <path d="M14.5 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7.5L14.5 2z" />
+                          <polyline points="14 2 14 8 20 8" />
+                        </svg>
+                      </div>
+                    )}
+                    <div className="min-w-0 flex-1">
+                      <p className="truncate text-sm text-zinc-200">{attachedFile.name}</p>
+                      <p className="text-xs text-zinc-500">{(attachedFile.size / 1024).toFixed(0)} KB · {attachedFile.type || "file"}</p>
+                    </div>
                     {sendState.status !== "done" && (
                       <button
-                        onClick={removePhoto}
-                        className="absolute -right-2 -top-2 flex h-6 w-6 items-center justify-center rounded-full bg-zinc-800 border border-border text-zinc-400 hover:bg-red-900 hover:text-red-300 transition"
-                        title="Remove photo"
+                        onClick={removeFile}
+                        className="flex-shrink-0 rounded-md p-1.5 text-zinc-400 transition hover:bg-zinc-800 hover:text-red-400"
+                        title="Remove file"
                       >
-                        <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                        <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
                           <path d="M18 6 6 18M6 6l12 12" />
                         </svg>
                       </button>
@@ -159,18 +171,18 @@ export function BroadcastModal() {
                     className="flex w-full items-center justify-center gap-2 rounded-lg border border-dashed border-zinc-700 bg-zinc-950 px-4 py-5 text-sm text-zinc-500 transition hover:border-zinc-500 hover:text-zinc-300 disabled:pointer-events-none disabled:opacity-50"
                   >
                     <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                      <rect width="18" height="18" x="3" y="3" rx="2" ry="2" />
-                      <circle cx="9" cy="9" r="2" />
-                      <path d="m21 15-3.086-3.086a2 2 0 0 0-2.828 0L6 21" />
+                      <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+                      <polyline points="17 8 12 3 7 8" />
+                      <line x1="12" x2="12" y1="3" y2="15" />
                     </svg>
-                    Click to attach a photo
+                    Click to attach a photo or file
                   </button>
                 )}
 
                 <input
                   ref={fileInputRef}
                   type="file"
-                  accept="image/*"
+                  accept="*"
                   className="hidden"
                   onChange={handleFileChange}
                 />
