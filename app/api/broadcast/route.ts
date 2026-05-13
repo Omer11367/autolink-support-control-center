@@ -9,43 +9,24 @@ function firstEnv(names: string[]): string | undefined {
   return undefined;
 }
 
-type RawPayload = {
-  message?: { chat?: { id?: number; title?: string } };
-  edited_message?: { chat?: { id?: number; title?: string } };
-  channel_post?: { chat?: { id?: number; title?: string } };
-};
-
-// GET /api/broadcast — returns the list of connected client chat IDs + titles.
+// GET /api/broadcast — returns the list of client groups that will receive broadcasts.
 export async function GET() {
-  const markGroupChatId = firstEnv(["MARK_GROUP_CHAT_ID", "MARK_INTERNAL_CHAT_ID"]) ?? "";
   const supabase = createSupabaseAdminClient();
 
   const { data, error } = await supabase
-    .from("messages")
-    .select("telegram_chat_id, raw_payload")
-    .in("message_type", ["client", "client_photo"])
-    .not("telegram_chat_id", "is", null)
-    .order("created_at", { ascending: false })
-    .limit(2000);
+    .from("client_groups")
+    .select("telegram_chat_id, group_name")
+    .eq("group_type", "client");
 
   if (error) {
     return NextResponse.json({ error: error.message }, { status: 500 });
   }
 
-  // Collect unique chat IDs with the best title we can find.
-  const seenChats = new Map<string, string>();
-  for (const row of data ?? []) {
-    const chatId = String(row.telegram_chat_id ?? "");
-    if (!chatId || chatId === markGroupChatId) continue;
-    if (seenChats.has(chatId)) continue;
+  const chats = (data ?? []).map((r) => ({
+    id: String(r.telegram_chat_id),
+    title: r.group_name ?? String(r.telegram_chat_id)
+  }));
 
-    const payload = row.raw_payload as RawPayload | null;
-    const msg = payload?.message ?? payload?.edited_message ?? payload?.channel_post;
-    const title = msg?.chat?.title?.trim() || chatId;
-    seenChats.set(chatId, title);
-  }
-
-  const chats = [...seenChats.entries()].map(([id, title]) => ({ id, title }));
   return NextResponse.json({ chats, total: chats.length });
 }
 
@@ -79,25 +60,22 @@ export async function POST(request: Request) {
     return NextResponse.json({ error: "Provide at least a message or a photo." }, { status: 400 });
   }
 
-  // Fetch all connected client chat IDs.
+  // Fetch only groups explicitly classified as 'client' in the routing dashboard.
+  // Using client_groups (not raw messages) ensures we only reach groups the admin
+  // has confirmed, and never accidentally message agency groups or stale test groups.
   const supabase = createSupabaseAdminClient();
   const { data, error } = await supabase
-    .from("messages")
+    .from("client_groups")
     .select("telegram_chat_id")
-    .in("message_type", ["client", "client_photo"])
-    .not("telegram_chat_id", "is", null);
+    .eq("group_type", "client");
 
   if (error) {
     return NextResponse.json({ error: error.message }, { status: 500 });
   }
 
-  const chatIds = [
-    ...new Set(
-      (data ?? [])
-        .map((r) => String(r.telegram_chat_id ?? ""))
-        .filter((id) => id && id !== markGroupChatId)
-    )
-  ];
+  const chatIds = (data ?? [])
+    .map((r) => String(r.telegram_chat_id ?? ""))
+    .filter((id) => id && id !== markGroupChatId);
 
   if (chatIds.length === 0) {
     return NextResponse.json({ sent: 0, failed: 0, total: 0, results: [] });
