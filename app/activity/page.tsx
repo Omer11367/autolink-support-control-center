@@ -1,4 +1,4 @@
-import { ActivityFeed } from "@/components/activity-feed";
+import { ClientsGrid } from "@/components/clients-grid";
 
 export const dynamic = "force-dynamic";
 
@@ -8,10 +8,10 @@ export default function ActivityPage() {
       <header>
         <h1 className="text-2xl font-bold tracking-normal">Activity</h1>
         <p className="mt-1 text-sm text-muted-foreground">
-          Every request from every client — deposits, shares, payments, and more. Search, filter, and click any row to see the full message and attachments.
+          All client activity at a glance. Click any client card to see their full request history by category.
         </p>
       </header>
-      <ActivityFeed />
+      <ClientsGrid />
     </div>
   );
 }
