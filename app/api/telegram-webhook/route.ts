@@ -198,14 +198,14 @@ function extractRelevantAnswer(
   return relevant.length > 0 ? relevant.join(" ") : null;
 }
 
-// Uses Claude to intelligently route an employee's message to the correct client(s).
+// Uses Gemini to intelligently route an employee's message to the correct client(s).
 // Returns a Map of chatId → the relevant portion of the message to send that client.
 // Returns null if the API call fails (caller should fall back to keyword routing).
-async function routeWithClaude(
+async function routeWithGemini(
   employeeMessage: string,
   clients: Array<{ chatId: string; chatTitle: string | null; intent: string | null; originalQuestion: string | null }>
 ): Promise<Map<string, string> | null> {
-  const apiKey = process.env.ANTHROPIC_API_KEY;
+  const apiKey = process.env.GEMINI_API_KEY_2 ?? process.env.GEMINI_API_KEY;
   if (!apiKey) return null;
 
   const clientDescriptions = clients
@@ -240,29 +240,23 @@ Respond with ONLY valid JSON (no explanation, no markdown):
 Only include clients who should actually receive a message. If no client is relevant, return {"routing":[]}.`;
 
   try {
-    const res = await fetch("https://api.anthropic.com/v1/messages", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "x-api-key": apiKey,
-        "anthropic-version": "2023-06-01"
-      },
-      body: JSON.stringify({
-        model: "claude-haiku-4-5",
-        max_tokens: 1024,
-        messages: [{ role: "user", content: prompt }]
-      })
-    });
+    const res = await fetch(
+      `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${apiKey}`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ contents: [{ parts: [{ text: prompt }] }] })
+      }
+    );
 
     if (!res.ok) {
-      console.error("claude-routing-api-error", { status: res.status });
+      console.error("gemini-routing-api-error", { status: res.status });
       return null;
     }
 
-    const data = (await res.json()) as { content?: Array<{ type: string; text: string }> };
-    const rawText = data.content?.find((b) => b.type === "text")?.text ?? "";
+    const data = (await res.json()) as { candidates?: Array<{ content?: { parts?: Array<{ text: string }> } }> };
+    const rawText = data.candidates?.[0]?.content?.parts?.[0]?.text ?? "";
 
-    // Extract JSON — Claude sometimes wraps it in markdown fences.
     const jsonMatch = rawText.match(/\{[\s\S]*\}/);
     if (!jsonMatch) return null;
 
@@ -276,10 +270,10 @@ Only include clients who should actually receive a message. If no client is rele
       }
     }
 
-    console.log("claude-routing-success", { clientsIn: clients.length, clientsRouted: routing.size });
+    console.log("gemini-routing-success", { clientsIn: clients.length, clientsRouted: routing.size });
     return routing.size > 0 ? routing : null;
   } catch (err) {
-    console.error("claude-routing-error", { error: err instanceof Error ? err.message : "unknown" });
+    console.error("gemini-routing-error", { error: err instanceof Error ? err.message : "unknown" });
     return null;
   }
 }
@@ -475,7 +469,7 @@ export async function POST(request: Request) {
           originalQuestion: tickets[0]?.originalQuestion ?? null
         }));
 
-        const aiRouting = await routeWithClaude(employeeText, clientsForAI);
+        const aiRouting = await routeWithGemini(employeeText, clientsForAI);
 
         if (aiRouting && aiRouting.size > 0) {
           // Claude successfully routed — use its decisions directly.
