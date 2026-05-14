@@ -1,9 +1,10 @@
 "use client";
 
 import { useEffect, useState, useMemo } from "react";
-import { ArrowLeft, Image as ImageIcon, ChevronDown, ChevronUp, RefreshCw } from "lucide-react";
+import { ArrowLeft, Image as ImageIcon, ChevronDown, ChevronUp, RefreshCw, Download } from "lucide-react";
 import Link from "next/link";
 import { Card } from "@/components/ui";
+import { ClientExportModal } from "@/components/client-export-modal";
 import type { ActivityItem } from "@/app/api/activity/route";
 
 const CATEGORIES = ["All", "Deposit", "Share", "Unshare", "Payment Issue", "Account Creation", "Verification", "Bans", "General"] as const;
@@ -149,6 +150,7 @@ export function ClientActivity({ chatId }: { chatId: string }) {
   const [agencyName, setAgencyName] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [activeCategory, setActiveCategory] = useState<Category>("All");
+  const [showExport, setShowExport] = useState(false);
 
   const fetchData = async () => {
     setLoading(true);
@@ -187,6 +189,15 @@ export function ClientActivity({ chatId }: { chatId: string }) {
 
   return (
     <div className="space-y-5">
+      {showExport && clientName && (
+        <ClientExportModal
+          chatId={chatId}
+          clientName={clientName}
+          agencyName={agencyName}
+          onClose={() => setShowExport(false)}
+        />
+      )}
+
       {/* Header */}
       <div className="flex items-start gap-4">
         <Link
@@ -199,7 +210,14 @@ export function ClientActivity({ chatId }: { chatId: string }) {
           <h1 className="text-2xl font-bold tracking-tight text-zinc-100">{clientName || chatId}</h1>
           {agencyName && <p className="mt-0.5 text-sm text-zinc-500">Agency: {agencyName}</p>}
         </div>
-        <div className="ml-auto shrink-0">
+        <div className="ml-auto flex shrink-0 items-center gap-2">
+          <button
+            onClick={() => setShowExport(true)}
+            className="inline-flex min-h-9 items-center gap-2 rounded-md border border-emerald-600/40 bg-emerald-950/60 px-3 py-2 text-sm font-semibold text-emerald-300 transition hover:bg-emerald-900/60"
+          >
+            <Download className="h-4 w-4" />
+            Export
+          </button>
           <button
             onClick={() => void fetchData()}
             className="inline-flex min-h-9 items-center gap-2 rounded-md border border-border bg-zinc-900 px-3 py-2 text-sm font-semibold text-zinc-100 transition hover:bg-zinc-800"

@@ -2,8 +2,9 @@
 
 import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
-import { RefreshCw, Search, FileSpreadsheet } from "lucide-react";
+import { RefreshCw, Search, FileSpreadsheet, Download } from "lucide-react";
 import { Card, Input } from "@/components/ui";
+import { ClientExportModal } from "@/components/client-export-modal";
 import type { ClientSummary } from "@/app/api/activity/summary/route";
 
 const CATEGORY_KEYS = ["Deposit", "Share", "Unshare", "Payment Issue", "Account Creation", "Verification", "Bans", "General"] as const;
@@ -63,7 +64,7 @@ function CategoryBar({ byCategory }: { byCategory: ClientSummary["byCategory"] }
   );
 }
 
-function ClientCard({ summary, onClick }: { summary: ClientSummary; onClick: () => void }) {
+function ClientCard({ summary, onClick, onExport }: { summary: ClientSummary; onClick: () => void; onExport: (e: React.MouseEvent) => void }) {
   const hasOpen = summary.open > 0;
   const topCategories = CATEGORY_KEYS
     .filter((k) => summary.byCategory[k] > 0)
@@ -84,11 +85,21 @@ function ClientCard({ summary, onClick }: { summary: ClientSummary; onClick: () 
             <p className="mt-0.5 truncate text-xs text-zinc-500">{summary.agencyName}</p>
           )}
         </div>
-        {hasOpen && (
-          <span className="shrink-0 rounded-full bg-blue-500/20 px-2 py-0.5 text-xs font-bold text-blue-300">
-            {summary.open} open
+        <div className="flex shrink-0 items-center gap-1.5">
+          {hasOpen && (
+            <span className="rounded-full bg-blue-500/20 px-2 py-0.5 text-xs font-bold text-blue-300">
+              {summary.open} open
+            </span>
+          )}
+          <span
+            role="button"
+            onClick={onExport}
+            title="Export to Google Sheets"
+            className="flex h-6 w-6 items-center justify-center rounded-md text-zinc-600 transition hover:bg-zinc-700 hover:text-emerald-300"
+          >
+            <Download className="h-3.5 w-3.5" />
           </span>
-        )}
+        </div>
       </div>
 
       <CategoryBar byCategory={summary.byCategory} />
@@ -126,6 +137,7 @@ export function ClientsGrid() {
   const [search, setSearch] = useState("");
   const [exporting, setExporting] = useState(false);
   const [exportResult, setExportResult] = useState<{ ok: boolean; rows?: number } | null>(null);
+  const [exportClient, setExportClient] = useState<ClientSummary | null>(null);
 
   const fetchData = async () => {
     setLoading(true);
@@ -171,6 +183,15 @@ export function ClientsGrid() {
 
   return (
     <div className="space-y-5">
+      {exportClient && (
+        <ClientExportModal
+          chatId={exportClient.chatId}
+          clientName={exportClient.clientName}
+          agencyName={exportClient.agencyName}
+          onClose={() => setExportClient(null)}
+        />
+      )}
+
       {/* Stats */}
       <div className="grid grid-cols-2 gap-3 sm:grid-cols-3">
         <Card className="text-center">
@@ -235,6 +256,7 @@ export function ClientsGrid() {
                 key={s.chatId}
                 summary={s}
                 onClick={() => router.push(`/activity/${s.chatId}`)}
+                onExport={(e) => { e.stopPropagation(); setExportClient(s); }}
               />
             ))}
           </div>
