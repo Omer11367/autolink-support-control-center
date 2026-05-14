@@ -142,8 +142,11 @@ export async function POST(request: Request) {
     .order("created_at", { ascending: false })
     .limit(3000);
 
-  if (from) query = query.gte("created_at", new Date(from).toISOString());
-  if (to)   query = query.lte("created_at", new Date(to + "T23:59:59").toISOString());
+  // Dates arrive as plain ISO date strings (e.g. "2026-05-14"). We anchor them to Israel
+  // timezone (UTC+2 standard / UTC+3 daylight). T22:00:00Z = midnight IST = start of that day.
+  // T20:59:59Z = 23:59:59 IDT (summer, UTC+3) — end of that day in Israel.
+  if (from) query = query.gte("created_at", new Date(from + "T22:00:00Z").toISOString());
+  if (to)   query = query.lte("created_at", new Date(to   + "T20:59:59Z").toISOString());
 
   const { data: tickets, error: ticketError } = await query;
   if (ticketError) return NextResponse.json({ ok: false, error: ticketError.message }, { status: 500 });
