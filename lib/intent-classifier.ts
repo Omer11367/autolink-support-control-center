@@ -199,10 +199,15 @@ const RULES: IntentRule[] = [
     intent: "site_issue",
     phrases: [
       "site is down", "site down", "website down", "site not working", "website not working",
-      "cant load", "can't load", "cannot load", "doesnt load", "doesn't load", "not loading",
-      "cant open", "can't open", "cannot open", "cant access", "can't access", "cannot access",
-      "not accessible", "cant see the site", "can't see the site",
-      "page not loading", "link not working", "link is down", "website is down"
+      "cant load", "can't load", "cannot load",
+      "doesnt load", "doesn't load", "dosent load", "dosnt load", "not loading",
+      "cant open", "can't open", "cannot open",
+      "cant access", "can't access", "cannot access",
+      "not accessible", "cant see the site", "can't see the site", "cant see site",
+      "page not loading", "link not working", "link is down", "website is down",
+      "site not loading", "website not loading", "cant reach", "can't reach",
+      "site error", "website error", "error loading", "failed to load",
+      "not opening", "wont open", "won't open", "wont load", "won't load"
     ],
     completionOptions: ["Handled"]
   },
@@ -693,8 +698,18 @@ function hasPaymentIssuePriority(text: string): boolean {
   return /\b(card\s+verification\s+issue|verify\s+card|payment\s+failed|cannot\s+pay|can't\s+pay|credit\s+card\s+problem|card\s+problem|payment\s+method\s+(?:rejected|problem|failed)|card\s+rejected|payment\s+declined)\b/i.test(text);
 }
 
+function hasSiteIssuePriority(text: string): boolean {
+  return /\b(site|website|page|link)\s+(is\s+)?(down|not\s+(loading|working|accessible|available|opening))\b/i.test(text)
+    || /\b(cant|can'?t|cannot|dosent|dosnt|doesnt|doesn'?t|wont|won'?t)\s+(load|open|access|reach)\b/i.test(text)
+    || /\bnot\s+(loading|accessible|opening|working)\b/i.test(text)
+    || /\bcant\s+see\s+(the\s+)?site\b/i.test(text)
+    || /\b(site|website)\s+(error|is\s+not\s+responding)\b/i.test(text)
+    || /\b(failed\s+to\s+load|error\s+loading)\b/i.test(text);
+}
+
 function hasDepositPriority(text: string): boolean {
   if (hasPaymentIssuePriority(text)) return false;
+  if (hasSiteIssuePriority(text)) return false;
 
   const hasTransferProof = /\b(payment\s+proof|proof\s+of\s+payment|transaction\s+hash|tx\s+hash|etherscan|polygonscan|bscscan|tronscan|usdt|trc20|erc20|hash)\b|https?:\/\/\S*(?:etherscan|polygonscan|bscscan|tronscan|blockchain)\S*|\b0x[a-f0-9]{40,}\b/i.test(text);
   // "send" (present tense) is intentionally included: "guys send 25k" is a deposit notification.
@@ -844,11 +859,13 @@ export function classifyIntent(message: string, previousContext = ""): Classifie
   const priorityIntent =
     hasPaymentIssuePriority(combined)
       ? "payment_issue"
-      : hasDepositPriority(combined)
-        ? "deposit_funds"
-        : hasAccountIssuePriority(combined)
-          ? "check_account_status"
-          : null;
+      : hasSiteIssuePriority(combined)
+        ? "site_issue"
+        : hasDepositPriority(combined)
+          ? "deposit_funds"
+          : hasAccountIssuePriority(combined)
+            ? "check_account_status"
+            : null;
 
   const semanticFallback = !priorityIntent ? semanticFallbackIntent(combined) : null;
 
