@@ -809,9 +809,13 @@ type DepositForward = {
   photoFileId: string | null;
 };
 
-// ── Gemini vision: analyze a photo and return "payment proof" or "" ─────────────────────────────
-// Called before batch classification so that a receipt photo with "please check" caption is
-// correctly routed to master instead of landing in General Questions at the agency.
+// ── Gemini vision: analyze a photo and return a context description ──────────────────────────────
+// Called before batch classification so the classifier knows what the image shows.
+// Returns a short description that gets prepended to message_text:
+// - "payment proof sent" → routes to master as deposit
+// - "site is down" → classified as site_issue
+// - "account disabled screenshot" → classified as account issue
+// - "" → no clear signal, classify on caption/text alone
 async function analyzePhotoWithGemini(fileId: string, botToken: string, geminiKey: string): Promise<string> {
   try {
     const fileRes = await fetch(`https://api.telegram.org/bot${botToken}/getFile?file_id=${encodeURIComponent(fileId)}`);
@@ -832,7 +836,16 @@ async function analyzePhotoWithGemini(fileId: string, botToken: string, geminiKe
           contents: [{
             parts: [
               { inline_data: { mime_type: mimeType, data: base64 } },
-              { text: "Is this image a payment receipt, proof of payment, money transfer confirmation, or crypto/blockchain transaction screenshot? Reply with exactly one word: 'yes' or 'no'." }
+              { text: `Classify this image into exactly ONE of these categories. Reply with ONLY the category label, nothing else.
+
+Categories:
+- "payment proof sent" — payment receipt, money transfer confirmation, crypto/blockchain transaction, bank transfer screenshot, USDT/crypto wallet screenshot
+- "site is down" — website error page, blank/black screen, loading error, 404/500 error, "cannot reach site", browser showing site not loading
+- "account disabled screenshot" — Facebook/Meta ad account disabled/restricted notification, account banned message, policy violation notice
+- "account screenshot" — ad account dashboard, campaign stats, spend report, BM (Business Manager) screenshot, ad manager interface
+- "other" — anything that doesn't clearly fit the above categories
+
+Reply with ONLY the exact category label from the list above.` }
             ]
           }]
         })
@@ -841,7 +854,12 @@ async function analyzePhotoWithGemini(fileId: string, botToken: string, geminiKe
     const geminiData = await geminiRes.json() as { candidates?: Array<{ content?: { parts?: Array<{ text: string }> } }> };
     const answer = geminiData.candidates?.[0]?.content?.parts?.[0]?.text?.trim().toLowerCase() ?? "";
     console.log("gemini-photo-result", { fileId, answer });
-    return answer.startsWith("yes") ? "payment proof sent" : "";
+
+    if (answer.includes("payment proof")) return "payment proof sent";
+    if (answer.includes("site is down") || answer.includes("site down")) return "site is down";
+    if (answer.includes("account disabled")) return "account disabled";
+    if (answer.includes("account screenshot")) return "account status check";
+    return "";
   } catch (e) {
     console.error("gemini-photo-analysis-failed", { error: e instanceof Error ? e.message : "unknown" });
     return "";

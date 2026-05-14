@@ -524,23 +524,42 @@ export async function POST(request: Request) {
         return NextResponse.json({ ok: false, error: "Missing bot token" }, { status: 500 });
       }
 
+      const employeePhoto = message.photo?.length
+        ? message.photo[message.photo.length - 1].file_id
+        : isImageDocument(message.document) ? message.document!.file_id : null;
+
       const forwardedTo: string[] = [];
       for (const target of targets) {
         try {
-          const res = await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-              chat_id: target.chatId,
-              text: target.text,
-              parse_mode: "HTML",
-              disable_web_page_preview: true
-            })
-          });
-          const payload = await res.json();
-          if (res.ok && payload.ok) {
+          let payload: { ok: boolean; result?: { message_id: number }; description?: string };
+
+          if (employeePhoto) {
+            const res = await fetch(`https://api.telegram.org/bot${token}/sendPhoto`, {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({
+                chat_id: target.chatId,
+                photo: employeePhoto,
+                ...(target.text ? { caption: target.text } : {})
+              })
+            });
+            payload = await res.json();
+          } else {
+            const res = await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({
+                chat_id: target.chatId,
+                text: target.text,
+                disable_web_page_preview: true
+              })
+            });
+            payload = await res.json();
+          }
+
+          if (payload.ok) {
             forwardedTo.push(target.chatId);
-            console.log("mark-reply-forwarded", { clientChatId: target.chatId, forwardedMsgId: payload.result?.message_id });
+            console.log("mark-reply-forwarded", { clientChatId: target.chatId, forwardedMsgId: payload.result?.message_id, hasPhoto: Boolean(employeePhoto) });
           } else {
             console.error("mark-reply-forward-failed", { clientChatId: target.chatId, error: payload.description });
           }
