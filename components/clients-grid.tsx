@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
-import { RefreshCw, Search, Users, TrendingUp } from "lucide-react";
+import { RefreshCw, Search, FileSpreadsheet } from "lucide-react";
 import { Card, Input } from "@/components/ui";
 import type { ClientSummary } from "@/app/api/activity/summary/route";
 
@@ -124,6 +124,8 @@ export function ClientsGrid() {
   const [summaries, setSummaries] = useState<ClientSummary[]>([]);
   const [loading, setLoading] = useState(true);
   const [search, setSearch] = useState("");
+  const [exporting, setExporting] = useState(false);
+  const [exportResult, setExportResult] = useState<{ ok: boolean; rows?: number } | null>(null);
 
   const fetchData = async () => {
     setLoading(true);
@@ -141,6 +143,20 @@ export function ClientsGrid() {
     const interval = setInterval(() => { void fetchData(); }, 30_000);
     return () => clearInterval(interval);
   }, []);
+
+  const handleExport = async () => {
+    setExporting(true);
+    setExportResult(null);
+    try {
+      const res = await fetch("/api/sheets-export", { method: "POST" });
+      const json = await res.json() as { ok: boolean; rows?: number };
+      setExportResult(json);
+    } catch {
+      setExportResult({ ok: false });
+    } finally {
+      setExporting(false);
+    }
+  };
 
   const filtered = search
     ? summaries.filter(
@@ -189,6 +205,19 @@ export function ClientsGrid() {
           <RefreshCw className="h-4 w-4" />
           Refresh
         </button>
+        <button
+          onClick={() => void handleExport()}
+          disabled={exporting}
+          className="inline-flex min-h-10 items-center gap-2 rounded-md border border-emerald-600/40 bg-emerald-950/60 px-3 py-2 text-sm font-semibold text-emerald-300 transition hover:bg-emerald-900/60 disabled:opacity-50"
+        >
+          <FileSpreadsheet className="h-4 w-4" />
+          {exporting ? "Exporting…" : "Export to Google Sheets"}
+        </button>
+        {exportResult && (
+          <span className={`text-xs font-medium ${exportResult.ok ? "text-emerald-400" : "text-red-400"}`}>
+            {exportResult.ok ? `✓ Exported ${exportResult.rows ?? ""} rows` : "Export failed — check env vars"}
+          </span>
+        )}
       </div>
 
       {/* Grid */}
