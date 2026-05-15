@@ -308,7 +308,7 @@ export async function POST(request: Request) {
     // and the legacy env var. Messages from any of these are employee replies, not client requests.
     // Also load master groups — the bot ignores all messages from master groups.
     const [{ data: agencyGroupsData }, { data: agencyTypeGroups }, { data: masterGroupsData }] = await Promise.all([
-      supabase.from("mark_groups").select("telegram_chat_id"),
+      supabase.from("mark_groups").select("id, telegram_chat_id"),
       supabase.from("client_groups").select("telegram_chat_id").eq("group_type", "agency"),
       supabase.from("client_groups").select("telegram_chat_id").eq("group_type", "master")
     ]);
@@ -320,6 +320,10 @@ export async function POST(request: Request) {
       ...(agencyTypeGroups ?? []).map((ag) => String(ag.telegram_chat_id)),
       ...(markGroupChatId ? [markGroupChatId] : [])
     ]);
+    // telegram_chat_id → mark_groups.id — used to validate client↔agency assignment at reply time
+    const markGroupIdByChat = new Map<string, string>(
+      (agencyGroupsData ?? []).map((ag) => [String(ag.telegram_chat_id), ag.id])
+    );
 
     const update = (await request.json()) as TelegramUpdate;
 
@@ -437,6 +441,35 @@ export async function POST(request: Request) {
           : "";
         const originalQuestion = (t as { client_original_message?: string | null }).client_original_message ?? null;
         byClient.set(key, [...(byClient.get(key) ?? []), { id: t.id, intent: t.intent, chatTitle: chatTitle || null, originalQuestion }]);
+      }
+
+      // ── Agency re-assignment guard ────────────────────────────────────────────
+      // A client may have been moved to a different agency after the batch summary
+      // was sent. The old agency's employees must not forward replies to a client
+      // that no longer belongs to them. Check each client's CURRENT mark_group_id
+      // and drop any that no longer match this agency group.
+      const currentMarkGroupId = markGroupIdByChat.get(String(chatId)) ?? null;
+      if (currentMarkGroupId) {
+        const { data: currentAssignments } = await supabase
+          .from("client_groups")
+          .select("telegram_chat_id, mark_group_id")
+          .in("telegram_chat_id", [...byClient.keys()]);
+
+        const currentAgencyMap = new Map(
+          (currentAssignments ?? []).map((cg) => [String(cg.telegram_chat_id), cg.mark_group_id])
+        );
+
+        for (const clientChatId of [...byClient.keys()]) {
+          if (currentAgencyMap.get(clientChatId) !== currentMarkGroupId) {
+            console.log("mark-reply-client-reassigned-skip", { clientChatId, agencyGroup: chatId });
+            byClient.delete(clientChatId);
+          }
+        }
+
+        if (byClient.size === 0) {
+          console.log("mark-reply-all-clients-reassigned", { replyToMsgId, agencyGroup: chatId });
+          return NextResponse.json({ ok: true, ignored: "clients_reassigned_to_other_agency" });
+        }
       }
 
       // Determine which clients should receive this employee message and WHAT text each gets.
