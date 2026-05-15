@@ -1146,25 +1146,53 @@ async function createTicketsFromQueuedMessages(
         continue;
       }
 
-      // Deposits are handled manually by the team.
-      // The bot acknowledges the client but does NOT create a ticket or notify Mark.
-      // This also prevents the employee's reply to a Mark batch from being accidentally
-      // forwarded to a deposit-only client group (since no shared internal_message_id is set).
+      // Deposits go to master group only — NOT to Mark's normal batch summary.
+      // We still create a ticket so the deposit appears in the activity dashboard.
+      // internal_message_id stays null so employee replies to the batch never
+      // accidentally forward to a deposit-only client group.
       if (classification.intent === "deposit_funds") {
         ticketsCreatedForChat++;
         chatDuplicateIntents.set(chatId, [...(chatDuplicateIntents.get(chatId) ?? []), "deposit_funds"]);
-        // Queue forward to master groups (sent after batch if a master group is configured).
-        // Check all messages in this deposit group for an attached proof-of-payment photo.
         const depositPhotoFileId = group.messages
           .map((msg) => getPhotoFileId(msg))
           .find((id) => id !== null) ?? null;
+        const depositLastMsg = group.messages[group.messages.length - 1];
         allDepositForwards.push({
           clientChatId: chatId,
-          clientTitle: getChatTitle(group.messages[group.messages.length - 1] ?? sortedUnprocessed[sortedUnprocessed.length - 1]!),
+          clientTitle: getChatTitle(depositLastMsg ?? sortedUnprocessed[sortedUnprocessed.length - 1]!),
           originalMessage: groupedText,
           photoFileId: depositPhotoFileId
         });
-        console.log("deposit-queued-for-master", { chatId, hasPhoto: Boolean(depositPhotoFileId) });
+        // Create ticket for dashboard visibility (not added to createdTickets so it
+        // is excluded from Mark's batch summary — master handles deposits, not Mark).
+        if (depositLastMsg) {
+          const { data: existingDeposit } = await supabase
+            .from("tickets")
+            .select("id")
+            .eq("client_chat_id", chatId)
+            .eq("client_original_message", groupedText)
+            .gte("created_at", duplicateStartIso)
+            .limit(1)
+            .maybeSingle();
+          if (!existingDeposit?.id) {
+            await supabase.from("tickets").insert({
+              ticket_code: createTicketCode(),
+              client_chat_id: chatId,
+              client_message_id: depositLastMsg.id ?? null,
+              client_username: getUsername(depositLastMsg),
+              intent: "deposit_funds",
+              status: "waiting_mark",
+              priority: "high",
+              needs_mark: true,
+              client_original_message: groupedText,
+              extracted_data: { chatTitle: getChatTitle(depositLastMsg) ?? null },
+              internal_summary: `Deposit notification. ${groupedText.slice(0, 200)}`,
+              holding_message_id: null,
+              internal_message_id: null,
+            });
+            console.log("deposit-ticket-created", { chatId, hasPhoto: Boolean(depositPhotoFileId) });
+          }
+        }
         continue;
       }
 
