@@ -361,6 +361,24 @@ export async function POST(request: Request) {
 
     const chatId = message.chat.id;
 
+    // ── Group rename — must run before ALL early-returns so every group type is covered ────────
+    // Telegram sends a new_chat_title service message whenever anyone renames the group.
+    // Previously this check only ran for client groups (after agency/master early-returns),
+    // so renaming an agency or master group was silently ignored.
+    if (message.new_chat_title) {
+      const newTitle = message.new_chat_title.trim();
+      await Promise.all([
+        supabase.from("client_groups")
+          .update({ group_name: newTitle, updated_at: new Date().toISOString() })
+          .eq("telegram_chat_id", String(chatId)),
+        supabase.from("mark_groups")
+          .update({ name: newTitle })
+          .eq("telegram_chat_id", String(chatId))
+      ]);
+      console.log("group-renamed", { chatId, newTitle });
+      return NextResponse.json({ ok: true, status: "group_name_updated" });
+    }
+
     // Master groups: bot is completely silent — ignore everything sent there.
     if (masterChatIds.has(String(chatId))) {
       return NextResponse.json({ ok: true, status: "master_group_ignored" });
@@ -609,18 +627,6 @@ export async function POST(request: Request) {
       .maybeSingle();
 
     const groupName = message.chat.title?.trim() ?? `Group ${chatId}`;
-
-    // Handle group rename service message — Telegram sends this when the group title changes.
-    if (message.new_chat_title) {
-      const newTitle = message.new_chat_title.trim();
-      if (knownGroup) {
-        await supabase.from("client_groups")
-          .update({ group_name: newTitle, updated_at: new Date().toISOString() })
-          .eq("telegram_chat_id", String(chatId));
-        console.log("group-renamed-via-service-msg", { chatId, newTitle });
-      }
-      return NextResponse.json({ ok: true, status: "group_name_updated" });
-    }
 
     // Silently sync name if it drifted (fire-and-forget — never blocks message processing)
     if (knownGroup && knownGroup.group_name !== groupName) {
