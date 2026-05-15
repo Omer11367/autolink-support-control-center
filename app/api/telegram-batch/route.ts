@@ -140,10 +140,11 @@ function isPureNonSupportChatter(text: string): boolean {
   const reactionOnly = /^[\s\u{1F44D}\u2764\uFE0F\u2705\u{1F64F}]+$/u.test(trimmed);
   const chatter = ["hi", "hello", "hey", "yo", "good morning", "good evening", "good night", "thanks", "thank you", "thx", "ty", "ok", "okay", "alright", "received", "noted", "greetings"];
   // Multi-word greetings: "hey guys", "hi team", "hello everyone", "hi all", etc.
-  const isMultiWordGreeting = /^(hey|hi|hello|yo|sup|heya|hiya)\s+(guys|team|all|everyone|y'?all|there|guys|fellas|folks)\.?!?$/i.test(trimmed);
+  // "hey guys", "hi team", "hello everyone" — optionally followed by "how are you" etc.
+  const isMultiWordGreeting = /^(hey|hi|hello|yo|sup|heya|hiya)\s+(guys|team|all|everyone|y'?all|there|fellas|folks)[,!?\s]*(?:how\s+(?:are|r)\s+(?:you|u|ya|yall|y'?all|you\s*guys|you\s*all|doing|everyone|everybody))?[.!?]*$/i.test(trimmed);
   // Social greetings that are clearly not support requests: "how are you guys?", "how r u", "how's it going" etc.
-  const isSocialGreeting = /^how (are|r) (you|u|ya|yall|y'?all|you\s+guys|you\s+all|you\s+doing|everybody|everyone)/i.test(trimmed)
-    || /^how'?s (it going|everything|things|life|business)/i.test(trimmed)
+  const isSocialGreeting = /^how\s+(are|r)\s+(you|u|ya|yall|y'?all|you\s+guys|you\s+all|you\s+doing|everybody|everyone)/i.test(trimmed)
+    || /^how'?s\s+(it going|everything|things|life|business)/i.test(trimmed)
     || /^(what'?s up|wyd|wassup|sup guys)/i.test(trimmed);
   return reactionOnly || chatter.includes(normalized) || isSocialGreeting || isMultiWordGreeting;
 }
@@ -153,9 +154,9 @@ function isGreetingText(text: string): boolean {
   if (["hi", "hello", "hey", "yo", "good morning", "good evening", "good night", "greetings"].includes(normalized)) return true;
   // Social greetings: "how are you", "how are you guys", "what's up", etc.
   const trimmed = text.trim();
-  // Multi-word greetings: "hey guys", "hi team", "hello everyone"
-  if (/^(hey|hi|hello|yo|sup|heya|hiya)\s+(guys|team|all|everyone|y'?all|there|fellas|folks)\.?!?$/i.test(trimmed)) return true;
-  if (/^how (are|r) (you|u|ya|yall|y'?all|you\s+guys|you\s+all|you\s+doing|everybody|everyone)/i.test(trimmed)) return true;
+  // "hey guys", "hi team", "hello everyone" — optionally followed by "how are you" etc.
+  if (/^(hey|hi|hello|yo|sup|heya|hiya)\s+(guys|team|all|everyone|y'?all|there|fellas|folks)[,!?\s]*(?:how\s+(?:are|r)\s+(?:you|u|ya|yall|y'?all|you\s*guys|you\s*all|doing|everyone|everybody))?[.!?]*$/i.test(trimmed)) return true;
+  if (/^how\s+(are|r)\s+(you|u|ya|yall|y'?all|you\s+guys|you\s+all|you\s+doing|everybody|everyone)/i.test(trimmed)) return true;
   if (/^how'?s (it going|everything|things|life|business)/i.test(trimmed)) return true;
   if (/^(what'?s up|wyd|wassup|sup guys)/i.test(trimmed)) return true;
   return false;
@@ -1183,7 +1184,7 @@ async function createTicketsFromQueuedMessages(
               intent: "deposit_funds",
               status: "waiting_mark",
               priority: "high",
-              needs_mark: true,
+              needs_mark: false,
               client_original_message: groupedText,
               extracted_data: { chatTitle: getChatTitle(depositLastMsg) ?? null },
               internal_summary: `Deposit notification. ${groupedText.slice(0, 200)}`,
